@@ -57,20 +57,25 @@ def get_ovn_idls(driver, trigger):
 def get_connection(db_class, trigger=None, driver=None):
     # The trigger is the start() method of the worker class
     if db_class == OvsdbNbOvnIdl:
+        #北向db接口
         args = (cfg.get_ovn_nb_connection(), 'OVN_Northbound')
         cls = ovsdb_monitor.OvnNbIdl
     elif db_class == OvsdbSbOvnIdl:
+        #南向db接口
         args = (cfg.get_ovn_sb_connection(), 'OVN_Southbound')
         cls = ovsdb_monitor.OvnSbIdl
 
     if trigger and trigger.im_class == ovsdb_monitor.OvnWorker:
         idl_ = cls.from_server(*args, driver=driver)
     else:
+        #无trigger情况下，直接传入args
+        #对应的是ovsdb_monitor.BaseOvnIdl将创建相应idl_
         idl_ = ovsdb_monitor.BaseOvnIdl.from_server(*args)
     return connection.Connection(idl_, timeout=cfg.get_ovn_ovsdb_timeout())
 
 
 class OvsdbNbOvnIdl(ovn_api.API):
+    #北向api接口
 
     ovsdb_connection = None
 

@@ -60,6 +60,7 @@ class OVNClient(object):
 
     @property
     def _plugin(self):
+        #返回核心插件
         if self._plugin_property is None:
             self._plugin_property = directory.get_plugin()
         return self._plugin_property
@@ -467,17 +468,22 @@ class OVNClient(object):
                 LOG.error('Unable to disassociate floating ip in gateway '
                           'router. Error: %s', e)
 
+    #获取路由器接外网的ip及其对应的网关
     def _get_external_router_and_gateway_ip(self, context, router):
+        #ext_gw_info是路由器的网关信息
         ext_gw_info = router.get(l3.EXTERNAL_GW_INFO, {})
+        #ext_fixed_ips是路由器对外的公网ip(可能会接入多个subnet,故有多个ip)
         ext_fixed_ips = ext_gw_info.get('external_fixed_ips', [])
         for ext_fixed_ip in ext_fixed_ips:
             subnet_id = ext_fixed_ip['subnet_id']
             subnet = self._plugin.get_subnet(context, subnet_id)
             if subnet['ip_version'] == 4:
+                #有多个但只返回一个（有点奇怪，应有多个才对）
                 return ext_fixed_ip['ip_address'], subnet.get('gateway_ip')
         return '', ''
 
     def _update_router_routes(self, context, router_id, add, remove):
+        #添加删除路由规则
         lrouter_name = utils.ovn_name(router_id)
         with self._nb_idl.transaction(check_error=True) as txn:
             for route in add:
@@ -526,10 +532,13 @@ class OVNClient(object):
         lrouter_name = utils.ovn_name(router['id'])
 
         # 1. Add the external gateway router port.
+        # 注意：当路由器的gq口有多个subnet接入时，这里只取了一个gatewayip,并将其做为默认路由
+        # 写入，这种情况下是有问题的，当某个gateway挂掉后，原来不影响工作，现在影响了。
+        # 这里应下发多条默认路由，由等价路由来完成此部分的工作。（ovs不支持等价路由）
         _, ext_gw_ip = self._get_external_router_and_gateway_ip(context,
                                                                 router)
         gw_port_id = router['gw_port_id']
-        port = self._plugin.get_port(context, gw_port_id)
+        port = self._plugin.get_port(context, gw_port_id) #取gw_port的配置
         try:
             self.create_router_port(router_id, port)
         except Exception:
@@ -540,6 +549,7 @@ class OVNClient(object):
                           {'id': port['id'], 'name': lrouter_name})
 
         # 2. Add default route with nexthop as ext_gw_ip
+        # 将选出的下一跳网关，设置为默认网关
         route = [{'destination': '0.0.0.0/0', 'nexthop': ext_gw_ip}]
         try:
             self._update_router_routes(context, router_id, route, [])
@@ -550,6 +560,7 @@ class OVNClient(object):
                           '%(name)s', {'route': route, 'name': lrouter_name})
 
         # 3. Add snat rules for tenant networks in lrouter if snat is enabled
+        # 选一个qg口上的ip来做snat
         if utils.is_snat_enabled(router) and networks:
             try:
                 self.update_nat_rules(router, networks, enable_snat=True)
@@ -594,17 +605,21 @@ class OVNClient(object):
 
     def create_router(self, router, networks=None):
         """Create a logical router."""
+        # 创建一个逻辑路由器
         context = n_context.get_admin_context()
         external_ids = {ovn_const.OVN_ROUTER_NAME_EXT_ID_KEY:
                         router.get('name', 'no_router_name')}
         enabled = router.get('admin_state_up')
+        #router在ovn中的名称
         lrouter_name = utils.ovn_name(router['id'])
         with self._nb_idl.transaction(check_error=True) as txn:
+            #北向接口创建路由器
             txn.add(self._nb_idl.create_lrouter(lrouter_name,
                                                 external_ids=external_ids,
                                                 enabled=enabled,
                                                 options={}))
 
+        #路由器有gateway,且接入了其它network,则进入（否则不处理）
         if router.get(l3.EXTERNAL_GW_INFO) and networks is not None:
             self._add_router_ext_gw(context, router, networks)
 
@@ -732,6 +747,7 @@ class OVNClient(object):
         func = (self._nb_idl.add_nat_rule_in_lrouter if enable_snat else
                 self._nb_idl.delete_nat_rule_in_lrouter)
         gw_lrouter_name = utils.ovn_name(router['id'])
+        #从众多的subnet中选择一个qg口上的ip，用其来做snat
         router_ip, _ = self._get_external_router_and_gateway_ip(context,
                                                                 router)
         with self._nb_idl.transaction(check_error=True) as txn:

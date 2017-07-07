@@ -115,6 +115,7 @@ def main():
     ovn_driver = core_plugin.mechanism_manager.mech_drivers['ovn-sync'].obj
     ovn_driver._nb_ovn = ovn_api
 
+    #北向库同步
     synchronizer = ovn_db_sync.OvnNbSynchronizer(
         core_plugin, ovn_api, mode, ovn_driver)
 

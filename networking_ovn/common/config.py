@@ -21,6 +21,7 @@ VLOG_LEVELS = {'CRITICAL': vlog.CRITICAL, 'ERROR': vlog.ERROR, 'WARNING':
                vlog.WARN, 'INFO': vlog.INFO, 'DEBUG': vlog.DEBUG}
 
 ovn_opts = [
+    #北向连接串
     cfg.StrOpt('ovn_nb_connection',
                default='tcp:127.0.0.1:6641',
                help=_('The connection string for the OVN_Northbound OVSDB.\n'
@@ -137,7 +138,6 @@ def list_opts():
     return [
         ('ovn', ovn_opts),
     ]
-
 
 def get_ovn_nb_connection():
     return cfg.CONF.ovn.ovn_nb_connection

@@ -63,6 +63,7 @@ class AddLSwitchCommand(command.BaseCommand):
                                             'name', self.name, None)
             if lswitch:
                 return
+        #创建并设置switch某一行
         row = txn.insert(self.api._tables['Logical_Switch'])
         row.name = self.name
         for col, val in self.columns.items():
@@ -255,6 +256,7 @@ class AddLRouterCommand(command.BaseCommand):
             lrouter = idlutils.row_by_value(self.api.idl, 'Logical_Router',
                                             'name', self.name, None)
             if lrouter:
+                #已存在此名称的路由器
                 return
 
         row = txn.insert(self.api._tables['Logical_Router'])

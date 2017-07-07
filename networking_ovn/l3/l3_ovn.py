@@ -63,6 +63,7 @@ class OVNL3RouterPlugin(service_base.ServicePluginBase,
 
     @property
     def _ovn_client(self):
+        #传入北向接口，南向接口来创建OVNClient
         if self._ovn_client_inst is None:
             self._ovn_client_inst = ovn_client.OVNClient(self._ovn,
                                                          self._sb_ovn)
@@ -70,6 +71,7 @@ class OVNL3RouterPlugin(service_base.ServicePluginBase,
 
     @property
     def _ovn(self):
+        #创建北向接口
         if self._nb_ovn_idl is None:
             LOG.info("Getting OvsdbNbOvnIdl")
             conn = impl_idl_ovn.get_connection(impl_idl_ovn.OvsdbNbOvnIdl)
@@ -78,6 +80,7 @@ class OVNL3RouterPlugin(service_base.ServicePluginBase,
 
     @property
     def _sb_ovn(self):
+        #创建南向接口
         if self._sb_ovn_idl is None:
             LOG.info("Getting OvsdbSbOvnIdl")
             conn = impl_idl_ovn.get_connection(impl_idl_ovn.OvsdbSbOvnIdl)
@@ -86,6 +89,7 @@ class OVNL3RouterPlugin(service_base.ServicePluginBase,
 
     @property
     def _plugin(self):
+        #取核心插件
         if self._plugin_property is None:
             self._plugin_property = directory.get_plugin()
         return self._plugin_property
@@ -99,15 +103,18 @@ class OVNL3RouterPlugin(service_base.ServicePluginBase,
                 " using OVN")
 
     def _get_router_ports(self, context, router_id, get_gw_port=False):
+        #取路由器的所有port
         router_db = self._get_router(context.elevated(), router_id)
         if get_gw_port:
             return [p.port for p in router_db.attached_ports]
         else:
+            #仅含路由器接口上的port
             return [p.port for p in router_db.attached_ports
                     if p.port_type == n_const.DEVICE_OWNER_ROUTER_INTF]
 
     def _get_v4_network_of_all_router_ports(self, context, router_id,
                                             ports=None):
+        #获取路由器接入到多少个network上
         networks = []
         ports = ports or self._get_router_ports(context, router_id)
         for port in ports:
@@ -118,6 +125,7 @@ class OVNL3RouterPlugin(service_base.ServicePluginBase,
         return networks
 
     def get_external_router_and_gateway_ip(self, context, router):
+        #获取路由外部ip的第一个ip及其所属subnet的网关（限ipv4)
         ext_gw_info = router.get(l3.EXTERNAL_GW_INFO, {})
         ext_fixed_ips = ext_gw_info.get('external_fixed_ips', [])
         for ext_fixed_ip in ext_fixed_ips:
@@ -128,11 +136,13 @@ class OVNL3RouterPlugin(service_base.ServicePluginBase,
         return '', ''
 
     def _get_router_ip(self, context, router):
+        #获取路由器外部ip(限一个）
         router_ip, gateway_ip = self.get_external_router_and_gateway_ip(
             context, router)
         return router_ip
 
     def _get_v4_network_for_router_port(self, context, port):
+        #获取路由器外部ip对应的网段（限一个）
         cidr = None
         for fixed_ip in port['fixed_ips']:
             subnet_id = fixed_ip['subnet_id']
@@ -143,6 +153,7 @@ class OVNL3RouterPlugin(service_base.ServicePluginBase,
         return cidr
 
     def create_router(self, context, router):
+        #创建路由器
         router = super(OVNL3RouterPlugin, self).create_router(context, router)
         networks = self._get_v4_network_of_all_router_ports(
             context, router['id'])
@@ -173,6 +184,7 @@ class OVNL3RouterPlugin(service_base.ServicePluginBase,
         return result
 
     def _update_lrouter_routes(self, context, router_id, add, remove):
+        #添加删除静态路由
         lrouter_name = utils.ovn_name(router_id)
         with self._ovn.transaction(check_error=True) as txn:
             for route in add:

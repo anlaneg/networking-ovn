@@ -44,6 +44,7 @@ class OVNGatewayScheduler(object):
         pass
 
     def _schedule_gateway(self, nb_idl, sb_idl, gateway_name, candidates):
+        #为某个gateway_name选择chassis
         existing_chassis = nb_idl.get_gateway_chassis_binding(gateway_name)
         candidates = candidates or self._get_chassis_candidates(sb_idl)
         if existing_chassis and (existing_chassis in candidates or

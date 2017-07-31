@@ -31,6 +31,7 @@ def ovn_name(id):
     # is a UUID. If so then there will be no matches.
     # We prefix the UUID to enable us to use the Neutron UUID when
     # updating, deleting etc.
+    # ovn路由器名称
     return 'neutron-%s' % id
 
 

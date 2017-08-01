@@ -335,6 +335,8 @@ class OvsdbNbOvnIdl(ovn_api.API):
 
     def get_gateway_chassis_binding(self, gateway_name):
         try:
+            #拿到指定port(文中名称有误），且port为gateway port
+            # 如果它没有绑定，返回NULL，否则返回绑定的chassis
             router = idlutils.row_by_value(self.idl,
                                            'Logical_Router_Port',
                                            'name',
@@ -492,6 +494,7 @@ class OvsdbNbOvnIdl(ovn_api.API):
                                                  if_exists)
 
     def get_lrouter_nat_rules(self, lrouter_name):
+        #取此路由器对应的所有nat规则
         try:
             lrouter = idlutils.row_by_value(self.idl, 'Logical_Router',
                                             'name', lrouter_name)
@@ -589,6 +592,7 @@ class OvsdbSbOvnIdl(ovn_api.SbAPI):
     def get_all_chassis(self, chassis_type=None):
         # TODO(azbiswas): Use chassis_type as input once the compute type
         # preference patch (as part of external ids) merges.
+        # 取chassis列所有内容
         chassis_list = []
         for ch in self.idl.tables['Chassis'].rows.values():
             chassis_list.append(ch.name)

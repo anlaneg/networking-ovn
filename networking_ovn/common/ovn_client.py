@@ -1,3 +1,4 @@
+# encoding:utf-8
 # Copyright 2017 Red Hat, Inc.
 # All Rights Reserved.
 #
@@ -407,6 +408,7 @@ class OVNClient(object):
 
     def _update_floatingip(self, floatingip, router_id, associate=True):
         fip_apis = {}
+        #添加或删除dnat_and_snat规则
         fip_apis['nat'] = self._nb_idl.add_nat_rule_in_lrouter if \
             associate else self._nb_idl.delete_nat_rule_in_lrouter
         gw_lrouter_name = utils.ovn_name(router_id)
@@ -436,10 +438,12 @@ class OVNClient(object):
                                 floatingip['external_ip'] and
                                 nat_rule['type'] == 'dnat_and_snat'):
                             fip_apis['nat'] = (
+                                #更新nat规则
                                 self._nb_idl.set_nat_rule_in_lrouter)
                             nat_rule_args = (gw_lrouter_name, nat_rule['uuid'])
                             break
 
+                #将浮动ip处理为dnat-and-snat方式，实现一一映射
                 txn.add(fip_apis['nat'](*nat_rule_args, type='dnat_and_snat',
                                         logical_ip=floatingip['logical_ip'],
                                         external_ip=floatingip['external_ip']))
@@ -521,17 +525,21 @@ class OVNClient(object):
             context, router)
 
         with self._nb_idl.transaction(check_error=True) as txn:
+            #删除下发的默认路由
             txn.add(self._nb_idl.delete_static_route(gw_lrouter_name,
                                                      ip_prefix='0.0.0.0/0',
                                                      nexthop=ext_gw_ip))
+            #删除接口
             txn.add(self._nb_idl.delete_lrouter_port(
                 utils.ovn_lrouter_port_name(gw_port_id),
                 gw_lrouter_name))
             for network in networks:
+                #删除snat规则
                 txn.add(self._nb_idl.delete_nat_rule_in_lrouter(
                     gw_lrouter_name, type='snat', logical_ip=network,
                     external_ip=router_ip))
 
+    #给出一组fixed_ips找出这组ip对应的subnet,进而获知各ip地址的掩码信息
     def _get_networks_for_router_port(self, port_fixed_ips):
         context = n_context.get_admin_context()
         networks = set()
@@ -539,6 +547,7 @@ class OVNClient(object):
             subnet_id = fixed_ip['subnet_id']
             subnet = self._plugin.get_subnet(context, subnet_id)
             cidr = netaddr.IPNetwork(subnet['cidr'])
+            #各ip地址的掩码长度与其subnet中配置的掩码长度一致
             networks.add("%s/%s" % (fixed_ip['ip_address'],
                                     str(cidr.prefixlen)))
         return list(networks)
@@ -576,7 +585,7 @@ class OVNClient(object):
                           '%(name)s', {'route': route, 'name': lrouter_name})
 
         # 3. Add snat rules for tenant networks in lrouter if snat is enabled
-        # 选一个qg口上的ip来做snat
+        # 选一个qg口上的ip来做snat,将srcip=networks的转为gq口上的一个ip出去
         if utils.is_snat_enabled(router) and networks:
             try:
                 self.update_nat_rules(router, networks, enable_snat=True)
@@ -649,9 +658,11 @@ class OVNClient(object):
         try:
             if gateway_new and not gateway_old:
                 # Route gateway is set
+                #当前有gateway,之前没有，处理为新增
                 self._add_router_ext_gw(context, new_router, networks)
             elif gateway_old and not gateway_new:
                 # router gateway is removed
+                # 处理为删除
                 self._delete_router_ext_gw(context, original_router,
                                            networks)
             elif gateway_new and gateway_old:
@@ -690,6 +701,7 @@ class OVNClient(object):
         if update:
             try:
                 with self._nb_idl.transaction(check_error=True) as txn:
+                    #修改路由器的对应字段
                     txn.add(self._nb_idl.update_lrouter(router_name, **update))
             except Exception as e:
                 with excutils.save_and_reraise_exception():
@@ -697,6 +709,7 @@ class OVNClient(object):
                               'Error: %(error)s', {'router': router_id,
                                                    'error': e})
         # Check for route updates
+        # 处理静态路由更新
         routes = delta['router'].get('routes')
         if routes:
             added, removed = helpers.diff_list_of_dict(
@@ -718,18 +731,21 @@ class OVNClient(object):
     def create_router_port(self, router_id, port):
         """Create a logical router port."""
         lrouter = utils.ovn_name(router_id)
+        #将fix-ip转换为网段形式
         networks = self._get_networks_for_router_port(port['fixed_ips'])
         lrouter_port_name = utils.ovn_lrouter_port_name(port['id'])
         is_gw_port = const.DEVICE_OWNER_ROUTER_GW == port.get(
-            'device_owner')
+            'device_owner') #检查此接口是否为gateway-port
         columns = {}
         if is_gw_port:
+            #对gateway进行调度，并选择chassis
             selected_chassis = self._ovn_scheduler.select(
                 self._nb_idl, self._sb_idl, lrouter_port_name)
             columns['options'] = {
                 #标记这个gateway放在那个chassis上
                 ovn_const.OVN_GATEWAY_CHASSIS_KEY: selected_chassis}
         with self._nb_idl.transaction(check_error=True) as txn:
+            #加入此接口
             txn.add(self._nb_idl.add_lrouter_port(name=lrouter_port_name,
                                                   lrouter=lrouter,
                                                   mac=port['mac_address'],
@@ -746,6 +762,7 @@ class OVNClient(object):
         lrouter_port_name = utils.ovn_lrouter_port_name(port['id'])
         update = {'networks': networks}
         with self._nb_idl.transaction(check_error=True) as txn:
+            #更新路由port的networks字段
             txn.add(self._nb_idl.update_lrouter_port(name=lrouter_port_name,
                                                      if_exists=False,
                                                      **update))
@@ -759,17 +776,20 @@ class OVNClient(object):
                 utils.ovn_lrouter_port_name(port_id),
                 utils.ovn_name(router_id), if_exists=True))
 
+    #增加删除nat规则（snat)
     def update_nat_rules(self, router, networks, enable_snat):
         """Update the NAT rules in a logical router."""
         context = n_context.get_admin_context()
         func = (self._nb_idl.add_nat_rule_in_lrouter if enable_snat else
-                self._nb_idl.delete_nat_rule_in_lrouter)
+                self._nb_idl.delete_nat_rule_in_lrouter) #如果开启snat则执行add,否则执行delete
         gw_lrouter_name = utils.ovn_name(router['id'])
         #从众多的subnet中选择一个qg口上的ip，用其来做snat
         router_ip, _ = self._get_external_router_and_gateway_ip(context,
                                                                 router)
         with self._nb_idl.transaction(check_error=True) as txn:
             for network in networks:
+                #配置nat各列，type='snat',logical_ip=此路由器上关联的所有network,qg口上的
+                #一个外部ip
                 txn.add(func(gw_lrouter_name, type='snat', logical_ip=network,
                              external_ip=router_ip))
 
@@ -779,9 +799,9 @@ class OVNClient(object):
             lswitch_name=utils.ovn_name(network['id']),
             addresses=['unknown'],
             external_ids={},
-            type='localnet',
-            tag=tag if tag else [],
-            options={'network_name': physnet}))
+            type='localnet',#localnet实际上是对接物理的那个网络
+            tag=tag if tag else [],#对接物理网络时分享的物理网络资源，例如vlan tag
+            options={'network_name': physnet})) #使用那个物理网络
 
     def create_network(self, network, physnet=None, segid=None):
         # Create a logical switch with a name equal to the Neutron network
@@ -797,10 +817,12 @@ class OVNClient(object):
                 lswitch_name=lswitch_name,
                 external_ids=ext_ids))
             if physnet is not None:
+                #如果有物理net,则检查采用的segment-id
                 tag = int(segid) if segid else None
                 self._create_provnet_port(txn, network, physnet, tag)
 
         if config.is_ovn_metadata_enabled():
+            #如果metadata被启用，则创建相应的dhcp接口
             # Create a neutron port for DHCP/metadata services
             port = {'port':
                     {'network_id': network['id'],
@@ -811,6 +833,7 @@ class OVNClient(object):
         return network
 
     def delete_network(self, network_id):
+        #network删除时，删除交换机
         self._nb_idl.delete_lswitch(
             utils.ovn_name(network_id), if_exists=True).execute(
                 check_error=True)
@@ -829,21 +852,25 @@ class OVNClient(object):
             return
 
         if not ovn_dhcp_options:
+            #未传递dhcp选项时，获取此选项
             ovn_dhcp_options = self._get_ovn_dhcp_options(
                 subnet, network, metadata_port_ip=metadata_port_ip)
 
         with self._nb_idl.transaction(check_error=True) as txn:
+            #将dhcp选项写入到表中
             txn.add(self._nb_idl.add_dhcp_options(
                 subnet['id'], **ovn_dhcp_options))
 
     def _get_ovn_dhcp_options(self, subnet, network, server_mac=None,
                               metadata_port_ip=None):
+        #获取dhcp选项
         external_ids = {'subnet_id': subnet['id']}
         dhcp_options = {'cidr': subnet['cidr'], 'options': {},
                         'external_ids': external_ids}
 
         if subnet['enable_dhcp']:
             if subnet['ip_version'] == const.IP_VERSION_4:
+                #自network,subnet中获取dhcp选项
                 dhcp_options['options'] = self._get_ovn_dhcpv4_opts(
                     subnet, network, server_mac=server_mac,
                     metadata_port_ip=metadata_port_ip)
@@ -855,12 +882,14 @@ class OVNClient(object):
 
     def _get_ovn_dhcpv4_opts(self, subnet, network, server_mac=None,
                              metadata_port_ip=None):
+        #添加dhcpv4的options
         if not subnet['gateway_ip']:
             return {}
 
         default_lease_time = str(config.get_ovn_dhcp_default_lease_time())
         mtu = network['mtu']
         options = {
+            #网关，lease的过期时间，mtu,网关地址
             'server_id': subnet['gateway_ip'],
             'lease_time': default_lease_time,
             'mtu': str(mtu),
@@ -870,24 +899,30 @@ class OVNClient(object):
         if server_mac:
             options['server_mac'] = server_mac
         else:
+            #为dhcp server生成mac地址
             options['server_mac'] = n_net.get_random_mac(
                 cfg.CONF.base_mac.split(':'))
 
         if subnet['dns_nameservers']:
+            #填充dns name server
             dns_servers = '{%s}' % ', '.join(subnet['dns_nameservers'])
             options['dns_server'] = dns_servers
 
         # If subnet hostroutes are defined, add them in the
         # 'classless_static_route' dhcp option
+        # 实现metadata主机路由注入
         classless_static_routes = "{"
         if metadata_port_ip:
+            #使得metadata的ip地址发送到metadata_port_ip
             classless_static_routes += ("%s/32,%s, ") % (
                 metadata_agent.METADATA_DEFAULT_IP, metadata_port_ip)
 
+        # 实现其它配置的主机路由注入
         for route in subnet['host_routes']:
             classless_static_routes += ("%s,%s, ") % (
                 route['destination'], route['nexthop'])
 
+        # 用户注入了其它主机路由，我们需要注入一条默认路由
         if classless_static_routes != "{":
             # if there are static routes, then we need to add the
             # default route in this option. As per RFC 3442 dhcp clients
@@ -998,8 +1033,10 @@ class OVNClient(object):
             if subnet['ip_version'] == 4:
                 context = n_context.get_admin_context()
                 self.update_metadata_port(context, network['id'])
+                #取出所有开启dhcp的subnet的ip地址
                 metadata_port_ip = self._find_metadata_port_ip(context, subnet)
 
+            #添加此subnet对应的dhcp选项
             self._add_subnet_dhcp_options(subnet, network,
                                           metadata_port_ip=metadata_port_ip)
 
@@ -1011,10 +1048,13 @@ class OVNClient(object):
         self.update_metadata_port(context, network['id'])
         metadata_port_ip = self._find_metadata_port_ip(context, subnet)
         if not original_subnet['enable_dhcp']:
+            #原来是没有开启的，现在开启了，故开启
             self._enable_subnet_dhcp_options(subnet, network, metadata_port_ip)
         elif not subnet['enable_dhcp']:
+            #移除dhcp选项
             self._remove_subnet_dhcp_options(subnet['id'])
         else:
+            #更新dhcp选项
             self._update_subnet_dhcp_options(subnet, network, metadata_port_ip)
 
     def delete_subnet(self, subnet_id):
@@ -1060,6 +1100,7 @@ class OVNClient(object):
             network_id=[network_id], device_owner=['network:dhcp']))
         # There should be only one metadata port per network
         if len(ports) == 1:
+            #每个network中只能有一个
             return ports[0]
         LOG.error("Metadata port couldn't be found for network %s", network_id)
 
@@ -1077,30 +1118,38 @@ class OVNClient(object):
         the given network in all its IPv4 subnets.
         """
         # Retrieve the metadata port of this network
+        # 找出此network中的metadata_port,每个network_id中仅需要存在一个
         metadata_port = self._find_metadata_port(context, network_id)
         if not metadata_port:
             return
 
         # Retrieve all subnets in this network
+        # 查看这个network有多少个subnet
         subnets = self._plugin.get_subnets(context, filters=dict(
             network_id=[network_id], ip_version=[4]))
 
+        #查看这个network中有多少个subnet_id
         subnet_ids = set(s['id'] for s in subnets)
+        #查看metadata_port中有多少个subnet_id
         port_subnet_ids = set(ip['subnet_id'] for ip in
                               metadata_port['fixed_ips'])
 
         # Find all subnets where metadata port doesn't have an IP in and
         # allocate one.
         if subnet_ids != port_subnet_ids:
+            #两者不相等，即不是metadata_port上不包含此network中所有subnet的ip地址，需要为它在每个subnet上申请一个
             wanted_fixed_ips = []
             for fixed_ip in metadata_port['fixed_ips']:
+                #已有的
                 wanted_fixed_ips.append(
                     {'subnet_id': fixed_ip['subnet_id'],
                      'ip_address': fixed_ip['ip_address']})
+            #期待的
             wanted_fixed_ips.extend(
                 dict(subnet_id=s)
                 for s in subnet_ids - port_subnet_ids)
 
+            #构造port请求数据，通过更新port，申请这些ip地址
             port = {'id': metadata_port['id'],
                     'port': {'network_id': network_id,
                              'fixed_ips': wanted_fixed_ips}}

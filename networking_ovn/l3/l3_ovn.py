@@ -115,6 +115,7 @@ class OVNL3RouterPlugin(service_base.ServicePluginBase,
     def _get_v4_network_of_all_router_ports(self, context, router_id,
                                             ports=None):
         #获取路由器接入到多少个network上
+        #这个函数有问题，当port上有多个ip地址时，实际上仅有一个生效
         networks = []
         ports = ports or self._get_router_ports(context, router_id)
         for port in ports:
@@ -168,6 +169,7 @@ class OVNL3RouterPlugin(service_base.ServicePluginBase,
         return router
 
     def update_router(self, context, id, router):
+        #路由器更新，做snat下发
         original_router = self.get_router(context, id)
         result = super(OVNL3RouterPlugin, self).update_router(context, id,
                                                               router)
@@ -197,6 +199,7 @@ class OVNL3RouterPlugin(service_base.ServicePluginBase,
                     nexthop=route['nexthop']))
 
     def delete_router(self, context, id):
+        #路由器删除
         original_router = self.get_router(context, id)
         super(OVNL3RouterPlugin, self).delete_router(context, id)
         try:
@@ -207,6 +210,7 @@ class OVNL3RouterPlugin(service_base.ServicePluginBase,
                     context, {'router': original_router})
 
     def add_router_interface(self, context, router_id, interface_info):
+        #路由器接口添加，当接口增加时，做snat时它的源ip的网段增加了，故需要更新
         router_interface_info = \
             super(OVNL3RouterPlugin, self).add_router_interface(
                 context, router_id, interface_info)
@@ -224,8 +228,10 @@ class OVNL3RouterPlugin(service_base.ServicePluginBase,
 
         router = self.get_router(context, router_id)
         if not router.get(l3.EXTERNAL_GW_INFO):
+            #如果无gateway,则直接返回
             return router_interface_info
 
+        #如果有gateway，则需要增加nat规则
         cidr = None
         for fixed_ip in port['fixed_ips']:
             subnet = self._plugin.get_subnet(context, fixed_ip['subnet_id'])
@@ -238,6 +244,7 @@ class OVNL3RouterPlugin(service_base.ServicePluginBase,
 
         if utils.is_snat_enabled(router) and cidr:
             try:
+                #snat更新
                 self._ovn_client.update_nat_rules(router, networks=[cidr],
                                                   enable_snat=True)
             except Exception:
@@ -255,6 +262,7 @@ class OVNL3RouterPlugin(service_base.ServicePluginBase,
         return router_interface_info
 
     def remove_router_interface(self, context, router_id, interface_info):
+        #路由器接口移除，接口移除会导致做snat的源ip网段减少，故需要更新snat规则
         router_interface_info = \
             super(OVNL3RouterPlugin, self).remove_router_interface(
                 context, router_id, interface_info)
@@ -274,6 +282,7 @@ class OVNL3RouterPlugin(service_base.ServicePluginBase,
         if not router.get(l3.EXTERNAL_GW_INFO):
             return router_interface_info
 
+        #有external_gateway时需要移除nat
         try:
             cidr = None
             if multi_prefix:
@@ -302,16 +311,17 @@ class OVNL3RouterPlugin(service_base.ServicePluginBase,
 
     def create_floatingip(self, context, floatingip,
                           initial_status=n_const.FLOATINGIP_STATUS_DOWN):
+        #添加floatingip,需要增加一对一nat规则
         fip = super(OVNL3RouterPlugin, self).create_floatingip(
             context, floatingip, initial_status)
         router_id = fip.get('router_id')
         if router_id:
             update_fip = {}
             fip_db = self._get_floatingip(context, fip['id'])
-            update_fip['fip_port_id'] = fip_db['floating_port_id']
-            update_fip['fip_net_id'] = fip['floating_network_id']
-            update_fip['logical_ip'] = fip['fixed_ip_address']
-            update_fip['external_ip'] = fip['floating_ip_address']
+            update_fip['fip_port_id'] = fip_db['floating_port_id']#floating-ip对应的port-id
+            update_fip['fip_net_id'] = fip['floating_network_id']#属于那个network
+            update_fip['logical_ip'] = fip['fixed_ip_address']#私网ip
+            update_fip['external_ip'] = fip['floating_ip_address']#floating-ip
             self._ovn_client.create_floatingip(update_fip, router_id)
 
             # NOTE(lucasagomes): Revise the expected status
@@ -323,6 +333,7 @@ class OVNL3RouterPlugin(service_base.ServicePluginBase,
         return fip
 
     def delete_floatingip(self, context, id):
+        #floating-ip删除，需要移除dnat_and_snat规则
         original_fip = self.get_floatingip(context, id)
         router_id = original_fip.get('router_id')
         super(OVNL3RouterPlugin, self).delete_floatingip(context, id)
@@ -338,6 +349,7 @@ class OVNL3RouterPlugin(service_base.ServicePluginBase,
                     LOG.error('Error in disassociating floatingip: %s', id)
 
     def update_floatingip(self, context, id, floatingip):
+        #floating-ip更新，需要更新dnat_and_snat规则
         fip_db = self._get_floatingip(context, id)
         previous_fip = self._make_floatingip_dict(fip_db)
         previous_port_id = previous_fip.get('port_id')
@@ -356,6 +368,7 @@ class OVNL3RouterPlugin(service_base.ServicePluginBase,
             update_fip['logical_ip'] = previous_fip['fixed_ip_address']
             update_fip['external_ip'] = fip['floating_ip_address']
             try:
+                #先移除掉
                 self._ovn_client.update_floatingip(
                     update_fip, previous_fip['router_id'], associate=False)
                 fip_status = n_const.FLOATINGIP_STATUS_DOWN
@@ -370,6 +383,7 @@ class OVNL3RouterPlugin(service_base.ServicePluginBase,
             update_fip['logical_ip'] = fip['fixed_ip_address']
             update_fip['external_ip'] = fip['floating_ip_address']
             try:
+                #重新绑定到另一个port上，关联创建规则
                 self._ovn_client.update_floatingip(
                     update_fip, fip['router_id'], associate=True)
                 fip_status = n_const.FLOATINGIP_STATUS_ACTIVE
@@ -378,11 +392,13 @@ class OVNL3RouterPlugin(service_base.ServicePluginBase,
                     LOG.error('Unable to update floating ip in gateway router')
 
         if fip_status:
+            #更新floatingip状态
             self.update_floatingip_status(context, id, fip_status)
 
         return fip
 
     def disassociate_floatingips(self, context, port_id, do_notify=True):
+        #解除floating-ip的关联，实现nat的移除
         fips = self.get_floatingips(context.elevated(),
                                     filters={'port_id': [port_id]})
         router_ids = super(OVNL3RouterPlugin, self).disassociate_floatingips(
@@ -404,6 +420,7 @@ class OVNL3RouterPlugin(service_base.ServicePluginBase,
         return router_ids
 
     def schedule_unhosted_gateways(self):
+        #所有未绑定到chassis的gateway port选择合适的chassis
         valid_chassis_list = self._sb_ovn.get_all_chassis()
         unhosted_gateways = self._ovn.get_unhosted_gateways(
             valid_chassis_list)
@@ -421,6 +438,8 @@ class OVNL3RouterPlugin(service_base.ServicePluginBase,
     @staticmethod
     @registry.receives(resources.SUBNET, [events.AFTER_UPDATE])
     def _subnet_update(resource, event, trigger, **kwargs):
+        #subnet更新可能会导致路由发生变化，故检查是否external-network发生变化
+        #如变换更新默认路由（我之前也在这种情况下出过一次bug)
         l3plugin = directory.get_plugin(plugin_constants.L3)
         if not l3plugin:
             return

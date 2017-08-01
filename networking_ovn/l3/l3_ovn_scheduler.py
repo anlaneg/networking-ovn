@@ -1,3 +1,4 @@
+# encoding:utf-8
 #
 #    Licensed under the Apache License, Version 2.0 (the "License"); you may
 #    not use this file except in compliance with the License. You may obtain
@@ -49,11 +50,12 @@ class OVNGatewayScheduler(object):
         candidates = candidates or self._get_chassis_candidates(sb_idl)
         if existing_chassis and (existing_chassis in candidates or
                                  not candidates):
-            return existing_chassis
+            return existing_chassis #有效的chassis不变更
         if not candidates:
             return ovn_const.OVN_GATEWAY_INVALID_CHASSIS
         # The actual binding of the gateway to a chassis via the options
         # column in the OVN_Northbound is done by the caller
+        # 从待选项里选择一个chassis
         chassis = self._select_gateway_chassis(nb_idl, candidates)
         LOG.debug("Gateway %s scheduled on chassis %s",
                   gateway_name, chassis)
@@ -69,6 +71,7 @@ class OVNGatewayScheduler(object):
         # the upstream code merges.
         # return sb_idl.get_all_chassis('gateway_router') or \
         #    sb_idl.get_all_chassis()
+        # 返回所有的chassis
         return sb_idl.get_all_chassis()
 
 

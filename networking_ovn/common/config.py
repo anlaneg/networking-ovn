@@ -199,6 +199,7 @@ def get_ovn_vhost_sock_dir():
 
 
 def get_ovn_dhcp_default_lease_time():
+    #lease的默认时间
     return cfg.CONF.ovn.dhcp_default_lease_time
 
 

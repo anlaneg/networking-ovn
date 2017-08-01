@@ -1,3 +1,4 @@
+# encoding:utf-8
 #    Licensed under the Apache License, Version 2.0 (the "License"); you may
 #    not use this file except in compliance with the License. You may obtain
 #    a copy of the License at
@@ -31,7 +32,7 @@ def ovn_name(id):
     # is a UUID. If so then there will be no matches.
     # We prefix the UUID to enable us to use the Neutron UUID when
     # updating, deleting etc.
-    # ovn路由器名称
+    # ovn路由器名称及交换机名称
     return 'neutron-%s' % id
 
 
@@ -43,6 +44,7 @@ def ovn_lrouter_port_name(id):
     #   - patch-lrp-<UUID>-to-<UUID>
     #   - patch-<UUID>-to-lrp-<UUID>
     # lrp stands for Logical Router Port
+    # 路由器接口名称
     return 'lrp-%s' % id
 
 
@@ -50,6 +52,7 @@ def ovn_provnet_port_name(network_id):
     # The name of OVN lswitch provider network port entry will be
     # provnet-<Network-UUID>. The port is created for network having
     # provider:physical_network attribute.
+    #创建provider network port,用于与物理网络实现基于segment id的共享
     return constants.OVN_PROVNET_PORT_NAME_PREFIX + '%s' % network_id
 
 

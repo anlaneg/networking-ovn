@@ -196,6 +196,7 @@ class OVNMechanismDriver(api.MechanismDriver):
                 admin_context, kwargs.get('security_group_rule_id'))
             self._ovn_client.delete_security_group_rule(sg_rule)
 
+    #目前支持以下几种物理网络类型
     def _is_network_type_supported(self, network_type):
         return (network_type in [const.TYPE_LOCAL,
                                  const.TYPE_FLAT,
@@ -203,6 +204,7 @@ class OVNMechanismDriver(api.MechanismDriver):
                                  const.TYPE_VLAN])
 
     def _validate_network_segments(self, network_segments):
+        #检查是否支持此种网络类型
         for network_segment in network_segments:
             network_type = network_segment['network_type']
             segmentation_id = network_segment['segmentation_id']

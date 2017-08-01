@@ -180,7 +180,7 @@ class SetLSwitchPortCommand(command.BaseCommand):
             msg = _("Logical Switch Port %s does not exist") % self.lport
             raise RuntimeError(msg)
 
-        # Delete DHCP_Options records no longer refered by this port.
+        # Delete DHCP_Options records no longer referred by this port.
         # The table rows should be consistent for the same transaction.
         # After we get DHCP_Options rows uuids from port dhcpv4_options
         # and dhcpv6_options references, the rows shouldn't disappear for
@@ -234,7 +234,7 @@ class DelLSwitchPortCommand(command.BaseCommand):
             msg = _("Port %s does not exist") % self.lport
             raise RuntimeError(msg)
 
-        # Delete DHCP_Options records no longer refered by this port.
+        # Delete DHCP_Options records no longer referred by this port.
         cur_port_dhcp_opts = get_lsp_dhcp_options_uuids(
             lport, self.lport)
         for uuid in cur_port_dhcp_opts:
@@ -752,6 +752,56 @@ class UpdateAddrSetExtIdsCommand(command.BaseCommand):
         for ext_id_key, ext_id_value in self.external_ids.items():
             addrset_external_ids[ext_id_key] = ext_id_value
         addrset.external_ids = addrset_external_ids
+
+
+class UpdateChassisExtIdsCommand(command.BaseCommand):
+    def __init__(self, api, name, external_ids, if_exists):
+        super(UpdateChassisExtIdsCommand, self).__init__(api)
+        self.name = name
+        self.external_ids = external_ids
+        self.if_exists = if_exists
+
+    def run_idl(self, txn):
+        try:
+            chassis = idlutils.row_by_value(self.api.idl, 'Chassis',
+                                            'name', self.name)
+        except idlutils.RowNotFound:
+            if self.if_exists:
+                return
+            msg = _("Chassis %s does not exist. "
+                    "Can't update external IDs") % self.name
+            raise RuntimeError(msg)
+
+        chassis.verify('external_ids')
+        chassis_external_ids = getattr(chassis, 'external_ids', {})
+        for ext_id_key, ext_id_value in self.external_ids.items():
+            chassis_external_ids[ext_id_key] = ext_id_value
+        chassis.external_ids = chassis_external_ids
+
+
+class UpdatePortBindingExtIdsCommand(command.BaseCommand):
+    def __init__(self, api, name, external_ids, if_exists):
+        super(UpdatePortBindingExtIdsCommand, self).__init__(api)
+        self.name = name
+        self.external_ids = external_ids
+        self.if_exists = if_exists
+
+    def run_idl(self, txn):
+        try:
+            port = idlutils.row_by_value(self.api.idl, 'Port_Binding',
+                                         'logical_port', self.name)
+        except idlutils.RowNotFound:
+            if self.if_exists:
+                return
+            msg = _("Port %s does not exist. "
+                    "Can't update external IDs") % self.name
+            raise RuntimeError(msg)
+
+        port.verify('external_ids')
+        port_external_ids = getattr(port, 'external_ids', {})
+        for ext_id_key, ext_id_value in self.external_ids.items():
+            port_external_ids[ext_id_key] = ext_id_value
+        port.external_ids = port_external_ids
 
 
 class AddDHCPOptionsCommand(command.BaseCommand):

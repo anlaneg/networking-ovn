@@ -26,6 +26,7 @@ from oslo_config import cfg
 from oslo_db import exception as os_db_exc
 from oslo_log import log
 
+from neutron.common import utils as n_utils
 from neutron.db import provisioning_blocks
 from neutron.services.qos import qos_consts
 from neutron.services.segments import db as segment_service_db
@@ -44,6 +45,11 @@ from networking_ovn.ovsdb import ovsdb_monitor
 
 
 LOG = log.getLogger(__name__)
+METADATA_READY_WAIT_TIMEOUT = 15
+
+
+class MetadataServiceReadyWaitTimeoutException(Exception):
+    pass
 
 
 class OVNMechanismDriver(api.MechanismDriver):
@@ -170,47 +176,25 @@ class OVNMechanismDriver(api.MechanismDriver):
             self.sb_synchronizer.sync()
 
     def _process_sg_notification(self, resource, event, trigger, **kwargs):
-        sg = kwargs.get('security_group')
-        external_ids = {ovn_const.OVN_SG_NAME_EXT_ID_KEY: sg['name']}
-        with self._nb_ovn.transaction(check_error=True) as txn:
-            for ip_version in ['ip4', 'ip6']:
-                if event == events.AFTER_CREATE:
-                    txn.add(self._nb_ovn.create_address_set(
-                            name=utils.ovn_addrset_name(sg['id'], ip_version),
-                            external_ids=external_ids))
-                elif event == events.AFTER_UPDATE:
-                    txn.add(self._nb_ovn.update_address_set_ext_ids(
-                            name=utils.ovn_addrset_name(sg['id'], ip_version),
-                            external_ids=external_ids))
-                elif event == events.BEFORE_DELETE:
-                    txn.add(self._nb_ovn.delete_address_set(
-                            name=utils.ovn_addrset_name(sg['id'], ip_version)))
+        sg = {'name': kwargs['security_group']['name'],
+              'id': kwargs['security_group']['id']}
+        if event == events.AFTER_CREATE:
+            self._ovn_client.create_security_group(sg)
+        elif event == events.AFTER_UPDATE:
+            self._ovn_client.update_security_group(sg)
+        elif event == events.BEFORE_DELETE:
+            self._ovn_client.delete_security_group(sg)
 
     def _process_sg_rule_notification(
             self, resource, event, trigger, **kwargs):
-        sg_id = None
-        sg_rule = None
-        is_add_acl = True
-
-        admin_context = n_context.get_admin_context()
         if event == events.AFTER_CREATE:
-            sg_rule = kwargs.get('security_group_rule')
-            sg_id = sg_rule['security_group_id']
+            self._ovn_client.create_security_group_rule(
+                kwargs.get('security_group_rule'))
         elif event == events.BEFORE_DELETE:
+            admin_context = n_context.get_admin_context()
             sg_rule = self._plugin.get_security_group_rule(
                 admin_context, kwargs.get('security_group_rule_id'))
-            sg_id = sg_rule['security_group_id']
-            is_add_acl = False
-
-        # TODO(russellb) It's possible for Neutron and OVN to get out of sync
-        # here. If updating ACls fails somehow, we're out of sync until another
-        # change causes another refresh attempt.
-        ovn_acl.update_acls_for_security_group(self._plugin,
-                                               admin_context,
-                                               self._nb_ovn,
-                                               sg_id,
-                                               sg_rule,
-                                               is_add_acl=is_add_acl)
+            self._ovn_client.delete_security_group_rule(sg_rule)
 
     def _is_network_type_supported(self, network_type):
         return (network_type in [const.TYPE_LOCAL,
@@ -598,6 +582,27 @@ class OVNMechanismDriver(api.MechanismDriver):
         # port is up. Any provisioning block (possibly added during port
         # creation or when OVN reports that the port is down) must be removed.
         LOG.info("OVN reports status up for port: %s", port_id)
+
+        if config.is_ovn_metadata_enabled() and self._sb_ovn:
+            # Wait until metadata service has been setup for this port in the
+            # chassis it resides.
+            chassis, datapath = (
+                self._sb_ovn.get_logical_port_chassis_and_datapath(port_id))
+            try:
+                n_utils.wait_until_true(
+                    lambda: datapath in
+                    self._sb_ovn.get_chassis_metadata_networks(chassis),
+                    timeout=METADATA_READY_WAIT_TIMEOUT,
+                    exception=MetadataServiceReadyWaitTimeoutException)
+            except MetadataServiceReadyWaitTimeoutException:
+                # If we reach this point it means that metadata agent didn't
+                # provision the datapath for this port on its chassis. Either
+                # the agent is not running or it crashed. We'll complete the
+                # provisioning block though.
+                LOG.warning("Metadata service is not ready for port %s, check"
+                            " networking-ovn-metadata-agent status/logs.",
+                            port_id)
+
         provisioning_blocks.provisioning_complete(
             n_context.get_admin_context(),
             port_id,

@@ -42,8 +42,7 @@ active/active HA mode.
 OVN also makes use of ovsdb-server for the OVN northbound and southbound
 databases.  ovsdb-server supports active/passive HA using replication.
 For more information, see:
-
-    https://github.com/openvswitch/ovs/blob/master/Documentation/OVSDB-replication.md
+https://github.com/openvswitch/ovs/blob/master/Documentation/OVSDB-replication.md
 
 A typical deployment would use something like Pacemaker to manage the
 active/passive HA process.  Clients would be pointed at a virtual IP
@@ -51,4 +50,4 @@ address.  When the HA manager detects a failure of the master, the
 virtual IP would be moved and the passive replica would become the
 new master.
 
-See :doc:`readme` for links to more details on OVN's architecture.
+See :doc:`ovn` for links to more details on OVN's architecture.

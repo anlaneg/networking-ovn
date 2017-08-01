@@ -479,6 +479,7 @@ class OVNClient(object):
             subnet = self._plugin.get_subnet(context, subnet_id)
             if subnet['ip_version'] == 4:
                 #有多个但只返回一个（有点奇怪，应有多个才对）
+                #返回gateway的一个ip地址，及其对应的gateway-ip
                 return ext_fixed_ip['ip_address'], subnet.get('gateway_ip')
         return '', ''
 
@@ -621,6 +622,7 @@ class OVNClient(object):
 
         #路由器有gateway,且接入了其它network,则进入（否则不处理）
         if router.get(l3.EXTERNAL_GW_INFO) and networks is not None:
+            #路由器有gateway
             self._add_router_ext_gw(context, router, networks)
 
     def update_router(self, new_router, original_router, delta, networks):
@@ -710,6 +712,7 @@ class OVNClient(object):
             selected_chassis = self._ovn_scheduler.select(
                 self._nb_idl, self._sb_idl, lrouter_port_name)
             columns['options'] = {
+                #标记这个gateway放在那个chassis上
                 ovn_const.OVN_GATEWAY_CHASSIS_KEY: selected_chassis}
         with self._nb_idl.transaction(check_error=True) as txn:
             txn.add(self._nb_idl.add_lrouter_port(name=lrouter_port_name,

@@ -410,8 +410,10 @@ class OVNL3RouterPlugin(service_base.ServicePluginBase,
         if unhosted_gateways:
             with self._ovn.transaction(check_error=True) as txn:
                 for g_name, r_options in unhosted_gateways.items():
+                    #为gateway选chassis(chassis就是每个ovn-controller所在的机器）
                     chassis = self.scheduler.select(self._ovn, self._sb_ovn,
                                                     g_name)
+                    #将这个port绑定到对应的机器
                     r_options['redirect-chassis'] = chassis
                     txn.add(self._ovn.update_lrouter_port(g_name,
                                                           options=r_options))

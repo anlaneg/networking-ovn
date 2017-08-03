@@ -106,10 +106,12 @@ class OVNQosDriver(object):
         device_owner = port.get('device_owner')
         if (device_owner and
                 device_owner.startswith(constants.DEVICE_OWNER_PREFIXES)):
+            #检查此port是否为网络设备接口
             return True
         return False
 
     def _generate_port_options(self, context, policy_id):
+        #取出接口的两个速度，
         if policy_id is None:
             return {}
         options = {}
@@ -129,6 +131,7 @@ class OVNQosDriver(object):
             return {}
         # Don't apply qos rules to network devices
         if self._is_network_device_port(port):
+            #不将qos应用到网络设备上
             return {}
 
         # Determine if port or network policy should be used

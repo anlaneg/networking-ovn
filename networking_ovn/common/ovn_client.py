@@ -74,13 +74,16 @@ class OVNClient(object):
             return []
 
         if utils.is_lsp_trusted(port):
+            #可信端口不做地址对处理
             return []
 
         allowed_addresses = set()
+        #在address中存入自身信息
         addresses = port['mac_address']
         for ip in port.get('fixed_ips', []):
             addresses += ' ' + ip['ip_address']
 
+        #在allowed_addresses中存入其它人的信息
         for allowed_address in port.get('allowed_address_pairs', []):
             # If allowed address pair has same mac as the port mac,
             # append the allowed ip address to the 'addresses'.
@@ -92,8 +95,10 @@ class OVNClient(object):
                 allowed_addresses.add(allowed_address['mac_address'] + ' ' +
                                       allowed_address['ip_address'])
 
+        #合并此信息
         allowed_addresses.add(addresses)
 
+        #最终结果 mac + ' ' + ip1 + ' ' + ip2 + ....
         return list(allowed_addresses)
 
     def _get_subnet_dhcp_options_for_port(self, port, ip_version):
@@ -101,10 +106,12 @@ class OVNClient(object):
 
         Return the first found DHCP options belong for the port.
         """
+        #取端口port上指定ip版本的subnet_id
         subnets = [
             fixed_ip['subnet_id']
             for fixed_ip in port['fixed_ips']
             if netaddr.IPAddress(fixed_ip['ip_address']).version == ip_version]
+        
         get_opts = self._nb_idl.get_subnets_dhcp_options(subnets)
         if get_opts:
             if ip_version == const.IP_VERSION_6:
@@ -155,6 +162,7 @@ class OVNClient(object):
 
         # This port has extra DHCP options defined, so we will create a new
         # row in DHCP_Options table for it.
+        # 更新dhcp选项到表中
         subnet_dhcp_options['options'].update(lsp_dhcp_opts)
         subnet_dhcp_options['external_ids'].update(
             {'port_id': port['id']})
@@ -167,6 +175,7 @@ class OVNClient(object):
         return {'cmd': add_dhcp_opts_cmd}
 
     def _get_port_options(self, port, qos_options=None):
+        #获取port对应的选项信息
         binding_prof = utils.validate_and_get_data_from_binding_profile(port)
         if qos_options is None:
             qos_options = self._qos_driver.get_qos_options(port)
@@ -240,9 +249,10 @@ class OVNClient(object):
             # The lport_name *must* be neutron port['id'].  It must match the
             # iface-id set in the Interfaces table of the Open_vSwitch
             # database which nova sets to be the port ID.
+            # 创建交换机port
             txn.add(self._nb_idl.create_lswitch_port(
-                    lport_name=port['id'],
-                    lswitch_name=lswitch_name,
+                    lport_name=port['id'],#接口名称
+                    lswitch_name=lswitch_name,#交换机名称
                     addresses=port_info.addresses,
                     external_ids=external_ids,
                     parent_name=port_info.parent_name,
@@ -254,6 +264,7 @@ class OVNClient(object):
                     dhcpv4_options=dhcpv4_options,
                     dhcpv6_options=dhcpv6_options))
 
+            #空的acl
             acls_new = ovn_acl.add_acls(self._plugin, admin_context,
                                         port, sg_cache, subnet_cache)
             for acl in acls_new:
@@ -268,6 +279,7 @@ class OVNClient(object):
                 for sg_id in sg_ids:
                     for ip_version in addresses:
                         if addresses[ip_version]:
+                            #更新address-pair
                             txn.add(self._nb_idl.update_address_set(
                                 name=utils.ovn_addrset_name(sg_id,
                                                             ip_version),
@@ -1058,6 +1070,7 @@ class OVNClient(object):
             self._update_subnet_dhcp_options(subnet, network, metadata_port_ip)
 
     def delete_subnet(self, subnet_id):
+        #移除dhcp选项
         self._remove_subnet_dhcp_options(subnet_id)
 
     def _process_security_group(self, security_group, func, external_ids=True):

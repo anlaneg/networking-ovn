@@ -109,6 +109,7 @@ class OVNMechanismDriver(api.MechanismDriver):
         return res
 
     def _setup_vif_port_bindings(self):
+        #仅支持normal绑定
         self.supported_vnic_types = [portbindings.VNIC_NORMAL]
         self.vif_details = {
             portbindings.VIF_TYPE_OVS: {
@@ -386,6 +387,7 @@ class OVNMechanismDriver(api.MechanismDriver):
         result in the deletion of the resource.
         """
         port = context.current
+        #创建port提前后，触发此回调，我们这里采用创建好的port走ovn_client的创建流程
         self._ovn_client.create_port(port)
         self._notify_dhcp_updated(port['id'])
 
@@ -496,6 +498,7 @@ class OVNMechanismDriver(api.MechanismDriver):
         port = context.current
         vnic_type = port.get(portbindings.VNIC_TYPE, portbindings.VNIC_NORMAL)
         if vnic_type not in self.supported_vnic_types:
+            #如果vnic类型不是我们支持的，则不处理
             LOG.debug('Refusing to bind port %(port_id)s due to unsupported '
                       'vnic_type: %(vnic_type)s' %
                       {'port_id': port['id'], 'vnic_type': vnic_type})
@@ -534,6 +537,7 @@ class OVNMechanismDriver(api.MechanismDriver):
             # network types. Once bug/1621879 is fixed, refuse to bind
             # ports with unsupported network types.
             if not self._is_network_type_supported(network_type):
+                #不支持此网络类型，报错
                 LOG.info('Upgrade allowing bind port %(port_id)s with '
                          'unsupported network type: %(network_type)s',
                          {'port_id': port['id'],
@@ -541,6 +545,7 @@ class OVNMechanismDriver(api.MechanismDriver):
 
             if (network_type in ['flat', 'vlan']) and \
                (physical_network not in chassis_physnets):
+                #指定的物理网络在本host上不存在，报错
                 LOG.info('Refusing to bind port %(port_id)s on '
                          'host %(host)s due to the OVN chassis '
                          'bridge mapping physical networks '
@@ -553,17 +558,19 @@ class OVNMechanismDriver(api.MechanismDriver):
             else:
                 if datapath_type == ovn_const.CHASSIS_DATAPATH_NETDEV and (
                     ovn_const.CHASSIS_IFACE_DPDKVHOSTUSER in iface_types):
+                    #采用netdev类型，将虚拟机端口绑定为：dpdkvhostuser方式
                     vhost_user_socket = utils.ovn_vhu_sockpath(
                         config.get_ovn_vhost_sock_dir(), port['id'])
-                    vif_type = portbindings.VIF_TYPE_VHOST_USER
+                    vif_type = portbindings.VIF_TYPE_VHOST_USER #vif采用vhostuser类型
                     port[portbindings.VIF_DETAILS].update({
                         portbindings.VHOST_USER_SOCKET: vhost_user_socket
-                        })
-                    vif_details = dict(self.vif_details[vif_type])
+                        }) #指出VIF的详细配置
+                    vif_details = dict(self.vif_details[vif_type]) #vif_details信息，通过类型模板找到
                     vif_details[portbindings.VHOST_USER_SOCKET] = \
-                        vhost_user_socket
+                        vhost_user_socket #指出socket地址
                 else:
-                    vif_type = portbindings.VIF_TYPE_OVS
+                    #采用非netdev类型时，采用ovs进行绑定
+                    vif_type = portbindings.VIF_TYPE_OVS #采用ovs方式进行绑定
                     vif_details = self.vif_details[vif_type]
 
                 context.set_binding(segment_to_bind[api.ID], vif_type,

@@ -26,8 +26,8 @@ OVN_PROJID_EXT_ID_KEY = 'neutron:project_id'
 OVN_DEVID_EXT_ID_KEY = 'neutron:device_id'
 OVN_CIDRS_EXT_ID_KEY = 'neutron:cidrs'
 OVN_PORT_BINDING_PROFILE = portbindings.PROFILE
-OVN_PORT_BINDING_PROFILE_PARAMS = [{'parent_name': six.string_types,
-                                    'tag': six.integer_types},
+OVN_PORT_BINDING_PROFILE_PARAMS = [{'parent_name': six.string_types,#父port名称
+                                    'tag': six.integer_types},#vlan信息
                                    {'vtep-physical-switch': six.string_types,
                                     'vtep-logical-switch': six.string_types}]
 OVN_ROUTER_PORT_OPTION_KEYS = ['router-port', 'nat-addresses']

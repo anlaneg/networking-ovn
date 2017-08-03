@@ -571,6 +571,7 @@ class OvsdbSbOvnIdl(ovn_api.SbAPI):
                                      check_error, log_errors)
 
     def _get_chassis_physnets(self, chassis):
+        #给出某个chassis上bridge的物理接口映射配置
         bridge_mappings = chassis.external_ids.get('ovn-bridge-mappings', '')
         mapping_dict = helpers.parse_mappings(bridge_mappings.split(','),
                                               unique_values=False)
@@ -600,6 +601,7 @@ class OvsdbSbOvnIdl(ovn_api.SbAPI):
 
     def get_chassis_data_for_ml2_bind_port(self, hostname):
         try:
+            #给定hostname取chassis
             chassis = idlutils.row_by_value(self.idl, 'Chassis',
                                             'hostname', hostname)
         except idlutils.RowNotFound:

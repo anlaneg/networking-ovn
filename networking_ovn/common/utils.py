@@ -58,6 +58,7 @@ def ovn_provnet_port_name(network_id):
 
 def ovn_vhu_sockpath(sock_dir, port_id):
     # Frame the socket path of a virtio socket
+    #生成vhostuser对应的socketpath
     return os.path.join(
         sock_dir,
         # this parameter will become the virtio port name,
@@ -80,6 +81,7 @@ def get_lsp_dhcp_opts(port, ip_version):
     lsp_dhcp_disabled = False
     lsp_dhcp_opts = {}
     if port['device_owner'].startswith(const.DEVICE_OWNER_PREFIXES):
+        #neutron接口，禁止dhcp
         lsp_dhcp_disabled = True
     else:
         for edo in port.get(edo_ext.EXTRADHCPOPTS, []):
@@ -89,6 +91,7 @@ def get_lsp_dhcp_opts(port, ip_version):
             if edo['opt_name'] == 'dhcp_disabled' and (
                     edo['opt_value'] in ['True', 'true']):
                 # OVN native DHCP is disabled on this port
+                #主动禁用dhcp
                 lsp_dhcp_disabled = True
                 # Make sure return value behavior not depends on the order and
                 # content of the extra DHCP options for the port
@@ -97,6 +100,7 @@ def get_lsp_dhcp_opts(port, ip_version):
 
             if edo['opt_name'] not in (
                     constants.SUPPORTED_DHCP_OPTS[ip_version]):
+                #不接受不认识的选项
                 continue
 
             opt = edo['opt_name'].replace('-', '_')
@@ -106,6 +110,7 @@ def get_lsp_dhcp_opts(port, ip_version):
 
 
 def is_lsp_trusted(port):
+    #检查接口是否为可信接口
     return n_utils.is_port_trusted(port) if port.get('device_owner') else False
 
 
@@ -134,15 +139,18 @@ def validate_and_get_data_from_binding_profile(port):
                 param_dict[param_key] = (port[
                     constants.OVN_PORT_BINDING_PROFILE][param_key])
             except KeyError:
+                #如果无此配置，跳continue
                 pass
         if len(param_dict) == 0:
             continue
         if len(param_dict) != len(param_keys):
+            #存在不认识的key
             msg = _('Invalid binding:profile. %s are all '
                     'required.') % param_keys
             raise n_exc.InvalidInput(error_message=msg)
         if (len(port[constants.OVN_PORT_BINDING_PROFILE]) != len(
                 param_keys)):
+            #存在过多的key
             msg = _('Invalid binding:profile. too many parameters')
             raise n_exc.InvalidInput(error_message=msg)
         break
@@ -150,6 +158,7 @@ def validate_and_get_data_from_binding_profile(port):
     if not param_dict:
         return {}
 
+    #检查获得的值是否是期待的类型，如果不是，报错
     for param_key, param_type in param_set.items():
         if param_type is None:
             continue
@@ -164,11 +173,12 @@ def validate_and_get_data_from_binding_profile(port):
     # parent_name.  Just let it raise the right exception if there is a
     # problem.
     if 'parent_name' in param_set:
-        plugin = directory.get_plugin()
+        plugin = directory.get_plugin() #取核心插件
         plugin.get_port(n_context.get_admin_context(),
-                        param_dict['parent_name'])
+                        param_dict['parent_name']) #确认port存在，如果port不存在，将扔异常
 
     if 'tag' in param_set:
+        #tag值必须是合法的vlan
         tag = int(param_dict['tag'])
         if tag < 0 or tag > 4095:
             msg = _('Invalid binding:profile. tag "%s" must be '

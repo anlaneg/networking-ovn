@@ -39,6 +39,7 @@ class OVNTrunkHandler(object):
         _nb_ovn = self.plugin_driver._nb_ovn
         with _nb_ovn.transaction(check_error=True) as txn:
             for port in subports:
+                #创建每个成员口，并指明其parent_name
                 txn.add(_nb_ovn.set_lswitch_port(port.port_id,
                                                  parent_name=parent_port,
                                                  tag=port.segmentation_id))
@@ -91,6 +92,7 @@ class OVNTrunkDriver(trunk_base.DriverBase):
 
     @registry.receives(trunk_consts.TRUNK_PLUGIN, [events.AFTER_INIT])
     def register(self, resource, event, trigger, **kwargs):
+        #注册trunk口的事件
         super(OVNTrunkDriver, self).register(
             resource, event, trigger, **kwargs)
         self._handler = OVNTrunkHandler(self.plugin_driver)

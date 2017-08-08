@@ -134,6 +134,8 @@ class OVNMechanismDriver(api.MechanismDriver):
 
         # Handle security group/rule notifications
         if self.sg_enabled:
+            #如果开启了安全组，则注册以下事件
+            #主要是处理安全组及安全组规则两个函数
             registry.subscribe(self._process_sg_notification,
                                resources.SECURITY_GROUP,
                                events.AFTER_CREATE)
@@ -332,6 +334,7 @@ class OVNMechanismDriver(api.MechanismDriver):
     def _is_port_provisioning_required(self, port, host, original_host=None):
         vnic_type = port.get(portbindings.VNIC_TYPE, portbindings.VNIC_NORMAL)
         if vnic_type not in self.supported_vnic_types:
+            #虚拟网卡的类型不支持，
             LOG.debug('No provisioning block for port %(port_id)s due to '
                       'unsupported vnic_type: %(vnic_type)s',
                       {'port_id': port['id'], 'vnic_type': vnic_type})
@@ -353,6 +356,7 @@ class OVNMechanismDriver(api.MechanismDriver):
             return False
 
         if not self._sb_ovn.chassis_exists(host):
+            #host对应的chassis不存在
             LOG.debug('No provisioning block for port %(port_id)s since no '
                       'OVN chassis for host: %(host)s',
                       {'port_id': port['id'], 'host': host})

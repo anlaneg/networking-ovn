@@ -573,9 +573,11 @@ class OvsdbSbOvnIdl(ovn_api.SbAPI):
 
     def _get_chassis_physnets(self, chassis):
         #给出某个chassis上bridge的物理接口映射配置
+        #例如：phys-net1:br-eth0,physnet2:br-eth1
         bridge_mappings = chassis.external_ids.get('ovn-bridge-mappings', '')
         mapping_dict = helpers.parse_mappings(bridge_mappings.split(','),
                                               unique_values=False)
+        #返回所有物理网名称
         return list(mapping_dict.keys())
 
     def chassis_exists(self, hostname):
@@ -608,9 +610,10 @@ class OvsdbSbOvnIdl(ovn_api.SbAPI):
         except idlutils.RowNotFound:
             msg = _('Chassis with hostname %s does not exist') % hostname
             raise RuntimeError(msg)
+        #返回此chassis表上的datapath-type,iface-types,
         return (chassis.external_ids.get('datapath-type', ''),
                 chassis.external_ids.get('iface-types', ''),
-                self._get_chassis_physnets(chassis))
+                self._get_chassis_physnets(chassis)) #返回此chassis上所有物理网名称
 
     def get_metadata_port_network(self, network):
         for port in self.idl.tables['Port_Binding'].rows.values():

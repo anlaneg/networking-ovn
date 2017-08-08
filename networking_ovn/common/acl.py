@@ -62,6 +62,7 @@ def acl_direction(r, port):
         portdir = 'outport'
     else:
         portdir = 'inport'
+    #方向定义
     return '%s == "%s"' % (portdir, port['id'])
 
 
@@ -77,6 +78,7 @@ def acl_ethertype(r):
         match = ' && ip6'
         ip_version = 'ip6'
         icmp = 'icmp6'
+    #返回协议层
     return match, ip_version, icmp
 
 
@@ -84,6 +86,7 @@ def acl_remote_ip_prefix(r, ip_version):
     if not r['remote_ip_prefix']:
         return ''
     src_or_dst = 'src' if r['direction'] == 'ingress' else 'dst'
+    #返回ip层方向检查
     return ' && %s.%s == %s' % (ip_version, src_or_dst,
                                 r['remote_ip_prefix'])
 
@@ -132,6 +135,7 @@ def acl_protocol_and_ports(r, icmp):
     else:
         match += ' && ip.proto == %s' % protocol
 
+    #返回协议与port
     return match
 
 
@@ -157,6 +161,7 @@ def add_sg_rule_acl_for_port(port, r, match):
         'ingress': 'to-lport',
         'egress': 'from-lport',
     }
+    #构造acl规则，在哪个lswitch的哪个lport上哪个方向上执行match,动作是放通
     acl = {"lswitch": utils.ovn_name(port['network_id']),
            "lport": port['id'],
            "priority": ovn_const.ACL_PRIORITY_ALLOW,
@@ -309,6 +314,7 @@ def update_acls_for_security_group(plugin,
         return
     lswitch_names = set([p['network_id'] for p in update_port_list])
 
+    #执行acl动作
     ovn.update_acls(list(lswitch_names),
                     iter(update_port_list),
                     acl_new_values_dict,

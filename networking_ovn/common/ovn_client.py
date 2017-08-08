@@ -215,10 +215,10 @@ class OVNClient(object):
 
     def create_port(self, port):
         port_info = self._get_port_options(port)
-        external_ids = {ovn_const.OVN_PORT_NAME_EXT_ID_KEY: port['name'],
-                        ovn_const.OVN_DEVID_EXT_ID_KEY: port['device_id'],
-                        ovn_const.OVN_PROJID_EXT_ID_KEY: port['project_id'],
-                        ovn_const.OVN_CIDRS_EXT_ID_KEY: port_info.cidrs}
+        external_ids = {ovn_const.OVN_PORT_NAME_EXT_ID_KEY: port['name'],#接口名称
+                        ovn_const.OVN_DEVID_EXT_ID_KEY: port['device_id'],#接口属于那个设备
+                        ovn_const.OVN_PROJID_EXT_ID_KEY: port['project_id'],#接口属于那个project
+                        ovn_const.OVN_CIDRS_EXT_ID_KEY: port_info.cidrs}#接口的ip地址
         lswitch_name = utils.ovn_name(port['network_id'])
         admin_context = n_context.get_admin_context()
         sg_cache = {}
@@ -825,11 +825,11 @@ class OVNClient(object):
 
         lswitch_name = utils.ovn_name(network['id'])
         with self._nb_idl.transaction(check_error=True) as txn:
-            txn.add(self._nb_idl.create_lswitch(
+            txn.add(self._nb_idl.create_lswitch(#创建虚拟交换机
                 lswitch_name=lswitch_name,
                 external_ids=ext_ids))
             if physnet is not None:
-                #如果有物理net,则检查采用的segment-id
+                #如果有物理net,则检查采用的segment-id，并创建localnet_port
                 tag = int(segid) if segid else None
                 self._create_provnet_port(txn, network, physnet, tag)
 
@@ -1074,6 +1074,7 @@ class OVNClient(object):
         self._remove_subnet_dhcp_options(subnet_id)
 
     def _process_security_group(self, security_group, func, external_ids=True):
+        #按func处理安全组（主要是安全组名称的填充）
         with self._nb_idl.transaction(check_error=True) as txn:
             for ip_version in ('ip4', 'ip6'):
                 kwargs = {'name': utils.ovn_addrset_name(security_group['id'],
@@ -1084,15 +1085,18 @@ class OVNClient(object):
                 txn.add(func(**kwargs))
 
     def create_security_group(self, security_group):
+        #创建安全组
         self._process_security_group(
             security_group, self._nb_idl.create_address_set)
 
     def delete_security_group(self, security_group):
+        #删除安全组
         self._process_security_group(
             security_group, self._nb_idl.delete_address_set,
             external_ids=False)
 
     def update_security_group(self, security_group):
+        #更新安全组
         self._process_security_group(
             security_group, self._nb_idl.update_address_set_ext_ids)
 
@@ -1103,9 +1107,11 @@ class OVNClient(object):
             rule['security_group_id'], rule, is_add_acl=is_add_acl)
 
     def create_security_group_rule(self, rule):
+        #创建安全组规则
         self._process_security_group_rule(rule)
 
     def delete_security_group_rule(self, rule):
+        #删除安全组规则
         self._process_security_group_rule(rule, is_add_acl=False)
 
     def _find_metadata_port(self, context, network_id):

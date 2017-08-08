@@ -67,6 +67,7 @@ def ovn_vhu_sockpath(sock_dir, port_id):
 
 
 def ovn_addrset_name(sg_id, ip_version):
+    #生成ovn的安全组名称
     # The name of the address set for the given security group id and ip
     # version. The format is:
     #   as-<ip version>-<security group uuid>
@@ -129,6 +130,7 @@ def validate_and_get_data_from_binding_profile(port):
     if (constants.OVN_PORT_BINDING_PROFILE not in port or
             not validators.is_attr_set(
                 port[constants.OVN_PORT_BINDING_PROFILE])):
+        #如果接口没有配置profile
         return {}
     param_set = {}
     param_dict = {}

@@ -409,10 +409,10 @@ class SetLRouterPortInLSwitchPortCommand(command.BaseCommand):
                     "exist") % self.lswitch_port
             raise RuntimeError(msg)
 
-        options = {'router-port': self.lrouter_port}
+        options = {'router-port': self.lrouter_port} #指出对应的路由器接口名称
         setattr(port, 'options', options)
         setattr(port, 'type', 'router')
-        setattr(port, 'addresses', 'router')
+        setattr(port, 'addresses', 'router') #指明此交换机接口连接的是路由器
 
 
 class AddACLCommand(command.BaseCommand):

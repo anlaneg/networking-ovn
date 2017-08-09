@@ -183,6 +183,7 @@ class OVNClient(object):
 
         cidrs = ''
         if vtep_physical_switch:
+            #采用的是vtep物理交换机，为系统外设备，则address置为unknow
             vtep_logical_switch = binding_prof.get('vtep-logical-switch')
             port_type = 'vtep'
             options = {'vtep-physical-switch': vtep_physical_switch,
@@ -757,12 +758,13 @@ class OVNClient(object):
                 #标记这个gateway放在那个chassis上
                 ovn_const.OVN_GATEWAY_CHASSIS_KEY: selected_chassis}
         with self._nb_idl.transaction(check_error=True) as txn:
-            #加入此接口
+            #在路由器上加入此接口
             txn.add(self._nb_idl.add_lrouter_port(name=lrouter_port_name,
                                                   lrouter=lrouter,
                                                   mac=port['mac_address'],
                                                   networks=networks,
                                                   **columns))
+            #加入交换机上与路由器相连的口
             txn.add(self._nb_idl.set_lrouter_port_in_lswitch_port(
                 port['id'], lrouter_port_name))
 
@@ -778,6 +780,7 @@ class OVNClient(object):
             txn.add(self._nb_idl.update_lrouter_port(name=lrouter_port_name,
                                                      if_exists=False,
                                                      **update))
+            #在networks对应的交换机上添加相应的接口
             txn.add(self._nb_idl.set_lrouter_port_in_lswitch_port(
                     port['id'], lrouter_port_name))
 

@@ -279,6 +279,7 @@ class OvsdbNbOvnIdl(ovn_api.API):
 
     def set_lrouter_port_in_lswitch_port(self, lswitch_port, lrouter_port,
                                          if_exists=True):
+        #在交换机上添加与路由器相连的口
         return cmd.SetLRouterPortInLSwitchPortCommand(self, lswitch_port,
                                                       lrouter_port, if_exists)
 
@@ -325,6 +326,7 @@ class OvsdbNbOvnIdl(ovn_api.API):
         for lrp in self._tables['Logical_Router_Port'].rows.values():
             if not lrp.name.startswith('lrp-'):
                 continue
+            #检查此lrp已绑定在那个chassis上了
             chassis_name = lrp.options.get(ovn_const.OVN_GATEWAY_CHASSIS_KEY)
             if not chassis_name:
                 continue

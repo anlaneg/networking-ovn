@@ -185,7 +185,7 @@ class OVNClient(object):
         if vtep_physical_switch:
             #采用的是vtep物理交换机，为系统外设备，则address置为unknow
             vtep_logical_switch = binding_prof.get('vtep-logical-switch')
-            port_type = 'vtep'
+            port_type = 'vtep' #用户通过profile指定了此port,将此port类型置为vtep(用于将物理交换机做网关情况）
             options = {'vtep-physical-switch': vtep_physical_switch,
                        'vtep-logical-switch': vtep_logical_switch}
             addresses = "unknown"

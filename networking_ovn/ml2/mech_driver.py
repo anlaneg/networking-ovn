@@ -248,6 +248,7 @@ class OVNMechanismDriver(api.MechanismDriver):
         cause the deletion of the resource.
         """
         network = context.current
+        #尝试着取network的物理网络名称及其对应的segmentation_id
         physnet = self._get_attribute(network, pnet.PHYSICAL_NETWORK)
         segid = self._get_attribute(network, pnet.SEGMENTATION_ID)
         self._ovn_client.create_network(network, physnet, segid)
@@ -522,6 +523,8 @@ class OVNMechanismDriver(api.MechanismDriver):
                       {'port_id': port['id'], 'host': context.host})
             return
 
+        #遍历每个要bind的segment,取出其对应的network_type,segmentation_id,physical_network
+        #
         for segment_to_bind in context.segments_to_bind:
             network_type = segment_to_bind['network_type']
             segmentation_id = segment_to_bind['segmentation_id']
@@ -562,9 +565,9 @@ class OVNMechanismDriver(api.MechanismDriver):
             else:
                 if datapath_type == ovn_const.CHASSIS_DATAPATH_NETDEV and (
                     ovn_const.CHASSIS_IFACE_DPDKVHOSTUSER in iface_types):
-                    #采用netdev类型，将虚拟机端口绑定为：dpdkvhostuser方式
+                    #采用netdev类型，且支持dpdkvhostuser方式，将虚拟机端口绑定为：dpdkvhostuser方式
                     vhost_user_socket = utils.ovn_vhu_sockpath(
-                        config.get_ovn_vhost_sock_dir(), port['id'])
+                        config.get_ovn_vhost_sock_dir(), port['id']) #生成vhost_user_socket地址
                     vif_type = portbindings.VIF_TYPE_VHOST_USER #vif采用vhostuser类型
                     port[portbindings.VIF_DETAILS].update({
                         portbindings.VHOST_USER_SOCKET: vhost_user_socket
@@ -577,6 +580,7 @@ class OVNMechanismDriver(api.MechanismDriver):
                     vif_type = portbindings.VIF_TYPE_OVS #采用ovs方式进行绑定
                     vif_details = self.vif_details[vif_type]
 
+                #设置绑定情况
                 context.set_binding(segment_to_bind[api.ID], vif_type,
                                     vif_details)
                 break

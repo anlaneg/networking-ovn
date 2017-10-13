@@ -203,6 +203,7 @@ class OvnNbSynchronizer(OvnDbSynchronizer):
                   len(sgs_to_update))
 
         if self.mode == SYNC_MODE_REPAIR:
+            #仅repair模式时，才向nb库中插入
             LOG.debug('Address-Set-SYNC: transaction started @ %s' %
                       str(datetime.now()))
             with self.ovn_api.transaction(check_error=True) as txn:
@@ -264,6 +265,7 @@ class OvnNbSynchronizer(OvnDbSynchronizer):
                          'remove': num_acls_to_remove})
 
         if self.mode == SYNC_MODE_REPAIR:
+            #仅repair模式时才向nb库中插入
             with self.ovn_api.transaction(check_error=True) as txn:
                 for acla in list(itertools.chain(*neutron_acls.values())):
                     LOG.warning('ACL found in Neutron but not in '
@@ -570,6 +572,7 @@ class OvnNbSynchronizer(OvnDbSynchronizer):
                                   ovn_subnet_dhcp_options):
         LOG.debug('OVN-NB Sync DHCP options for Neutron subnets started')
 
+        #实现subnet名称到subnet记录的映射
         db_subnets = {}
         filters = {'enable_dhcp': [1]}
         for subnet in self.core_plugin.get_subnets(ctx, filters=filters):
@@ -593,10 +596,13 @@ class OvnNbSynchronizer(OvnDbSynchronizer):
                 # Verify that the cidr and options are also in sync.
                 if dhcp_options['cidr'] == ovn_dhcp_opts['cidr'] and (
                         dhcp_options['options'] == ovn_dhcp_opts['options']):
+                    #无变更，直接删除掉
                     del db_subnets[subnet_id]
                 else:
+                    #需要更新
                     db_subnets[subnet_id]['ovn_dhcp_options'] = dhcp_options
             else:
+                #mysql中已不存在，需要自nb中移除
                 del_subnet_dhcp_opts_list.append(ovn_dhcp_opts)
 
         for subnet_id, subnet in db_subnets.items():
@@ -627,6 +633,7 @@ class OvnNbSynchronizer(OvnDbSynchronizer):
                 txn_commands.append(self.ovn_api.delete_dhcp_options(
                     dhcp_opt['uuid']))
 
+        #自数据库移除
         if txn_commands:
             with self.ovn_api.transaction(check_error=True) as txn:
                 for cmd in txn_commands:
@@ -700,11 +707,13 @@ class OvnNbSynchronizer(OvnDbSynchronizer):
     def sync_networks_ports_and_dhcp_opts(self, ctx):
         LOG.debug('OVN-NB Sync networks, ports and DHCP options started')
         db_networks = {}
+        #实现network-id与network的映射
         for net in self.core_plugin.get_networks(ctx):
             db_networks[utils.ovn_name(net['id'])] = net
 
         # Ignore the floating ip ports with device_owner set to
         # constants.DEVICE_OWNER_FLOATINGIP
+        # 取所有非floating-ip的port
         db_ports = {port['id']: port for port in
                     self.core_plugin.get_ports(ctx) if not
                     port.get('device_owner', '').startswith(
@@ -713,17 +722,20 @@ class OvnNbSynchronizer(OvnDbSynchronizer):
         ovn_all_dhcp_options = self.ovn_api.get_all_dhcp_options()
         db_network_cache = dict(db_networks)
 
-        ports_need_sync_dhcp_opts = []
+        ports_need_sync_dhcp_opts = [] #需要同步dhcp选项的port
         lswitches = self.ovn_api.get_all_logical_switches_with_ports()
-        del_lswitchs_list = []
-        del_lports_list = []
-        add_provnet_ports_list = []
+        del_lswitchs_list = [] #需要删除的lswitch
+        del_lports_list = [] #需要删除的lport
+        add_provnet_ports_list = [] #需要添加provnet_port
         for lswitch in lswitches:
             if lswitch['name'] in db_networks:
+                #确定port是否存在
                 for lport in lswitch['ports']:
                     if lport in db_ports:
+                        #记录此port需要检查dhcp_opts
                         ports_need_sync_dhcp_opts.append(db_ports.pop(lport))
                     else:
+                        #此port在lswitch上需要不存在的，移除
                         del_lports_list.append({'port': lport,
                                                 'lswitch': lswitch['name']})
                 db_network = db_networks[lswitch['name']]
@@ -731,14 +743,17 @@ class OvnNbSynchronizer(OvnDbSynchronizer):
                 # Updating provider attributes is forbidden by neutron, thus
                 # we only need to consider missing provnet-ports in OVN DB.
                 if physnet and not lswitch['provnet_port']:
+                    #provider网段添加
                     add_provnet_ports_list.append(
                         {'network': db_network,
                          'lswitch': lswitch['name']})
 
                 del db_networks[lswitch['name']]
             else:
+                #nb中的lswitch在mysql中不存在，故需要删除
                 del_lswitchs_list.append(lswitch)
 
+        #前文已将存在的network自db_networks中移除掉了，故余下的均为需要添加的
         for net_id, network in db_networks.items():
             LOG.warning("Network found in Neutron but not in "
                         "OVN DB, network_id=%s", network['id'])
@@ -751,9 +766,11 @@ class OvnNbSynchronizer(OvnDbSynchronizer):
                     LOG.warning("Create network in OVN NB failed for "
                                 "network %s", network['id'])
 
+        #同步dhcp选项
         self._sync_subnet_dhcp_options(
             ctx, db_network_cache, ovn_all_dhcp_options['subnets'])
 
+        #需要添加的port
         for port_id, port in db_ports.items():
             LOG.warning("Port found in Neutron but not in OVN "
                         "DB, port_id=%s", port['id'])
@@ -777,6 +794,7 @@ class OvnNbSynchronizer(OvnDbSynchronizer):
                                 " port %s", port['id'])
 
         with self.ovn_api.transaction(check_error=True) as txn:
+            #lswitch移除
             for lswitch in del_lswitchs_list:
                 LOG.warning("Network found in OVN but not in "
                             "Neutron, network_id=%s", lswitch['name'])

@@ -823,6 +823,7 @@ class OVNClient(object):
         # UUID.  This provides an easy way to refer to the logical switch
         # without having to track what UUID OVN assigned to it.
         ext_ids = {
+            #network的名称
             ovn_const.OVN_NETWORK_NAME_EXT_ID_KEY: network['name']
         }
 

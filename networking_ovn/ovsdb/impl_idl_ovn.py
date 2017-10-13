@@ -68,7 +68,7 @@ def get_connection(db_class, trigger=None, driver=None):
     if trigger and trigger.im_class == ovsdb_monitor.OvnWorker:
         idl_ = cls.from_server(*args, driver=driver)
     else:
-        #无trigger情况下，直接传入args
+        #非OvnWorker trigger情况下，直接传入args
         #对应的是ovsdb_monitor.BaseOvnIdl将创建相应idl_
         idl_ = ovsdb_monitor.BaseOvnIdl.from_server(*args)
     return connection.Connection(idl_, timeout=cfg.get_ovn_ovsdb_timeout())
@@ -591,7 +591,9 @@ class OvsdbSbOvnIdl(ovn_api.SbAPI):
 
     def get_chassis_hostname_and_physnets(self):
         chassis_info_dict = {}
+        #取Chassis表中所有行
         for ch in self.idl.tables['Chassis'].rows.values():
+            #设置每个主机对应的'ovn-bridge-mappings'
             chassis_info_dict[ch.hostname] = self._get_chassis_physnets(ch)
         return chassis_info_dict
 

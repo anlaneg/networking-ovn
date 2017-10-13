@@ -662,11 +662,11 @@ class OVNMechanismDriver(api.MechanismDriver):
 
     def _add_segment_host_mapping_for_segment(self, resource, event, trigger,
                                               context, segment):
-        phynet = segment.physical_network
+        phynet = segment.physical_network #取segment对应的物理网络
         if not phynet:
             return
 
         host_phynets_map = self._sb_ovn.get_chassis_hostname_and_physnets()
         hosts = {host for host, phynets in host_phynets_map.items()
-                 if phynet in phynets}
+                 if phynet in phynets} #取出有此phynet对应的hosts （此segment可在此hosts上调度）
         segment_service_db.map_segment_to_hosts(context, segment.id, hosts)

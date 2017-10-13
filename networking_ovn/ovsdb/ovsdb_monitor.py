@@ -142,6 +142,8 @@ class OvnDbNotifyHandler(event.RowEventHandler):
 class BaseOvnIdl(connection.OvsdbIdl):
     @classmethod
     def from_server(cls, connection_string, schema_name):
+        #connection_string 连接到ovsdb服务器地址
+        #连接的库名称
         _check_and_set_ssl_files(schema_name)
         helper = idlutils.get_schema_helper(connection_string, schema_name)
         helper.register_all()
@@ -267,6 +269,7 @@ class OvnSbIdl(OvnIdl):
 
 def _check_and_set_ssl_files(schema_name):
     if schema_name == 'OVN_Southbound':
+        #如果模式名称为南向库
         priv_key_file = ovn_config.get_ovn_sb_private_key()
         cert_file = ovn_config.get_ovn_sb_certificate()
         ca_cert_file = ovn_config.get_ovn_sb_ca_cert()

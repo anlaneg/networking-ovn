@@ -94,7 +94,7 @@ def get_connection(db_class, trigger=None, driver=None):
     # The trigger is the start() method of the worker class
     if db_class == OvsdbNbOvnIdl:
         #北向db接口
-        args = (cfg.get_ovn_nb_connection(), 'OVN_Northbound')
+        args = (cfg.get_ovn_nb_connection(), 'OVN_Northbound') #准备参数
         cls = ovsdb_monitor.OvnNbIdl
     elif db_class == OvsdbSbOvnIdl:
         #南向db接口
@@ -107,9 +107,9 @@ def get_connection(db_class, trigger=None, driver=None):
         if db_class == OvsdbSbOvnIdl:
             idl_ = ovsdb_monitor.BaseOvnSbIdl.from_server(*args)
         else:
-            #非OvnWorker trigger情况下，直接传入args
+            #非Ovn Worker trigger情况下，直接传入args
             #对应的是ovsdb_monitor.BaseOvnIdl将创建相应idl_
-
+            #（这个idl_通过向远端获取模式，可知道此数据库的元数据）
             idl_ = ovsdb_monitor.BaseOvnIdl.from_server(*args)
     return connection.Connection(idl_, timeout=cfg.get_ovn_ovsdb_timeout())
 
@@ -117,7 +117,6 @@ def get_connection(db_class, trigger=None, driver=None):
 class OvsdbNbOvnIdl(Backend, ovn_api.API):
     #北向api接口
     schema = 'OVN_Northbound'
->>>>>>> upstream/master
     ovsdb_connection = None
 
     def __init__(self, connection):

@@ -142,6 +142,7 @@ def list_opts():
         ('ovn', ovn_opts),
     ]
 
+#获取北向库ovsdb连接地址，例如：tcp:127.0.0.1:6641
 def get_ovn_nb_connection():
     return cfg.CONF.ovn.ovn_nb_connection
 

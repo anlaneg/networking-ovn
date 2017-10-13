@@ -90,12 +90,15 @@ class AddLSwitchCommand(command.BaseCommand):
                 return
         #创建并设置switch某一行
         row = txn.insert(self.api._tables['Logical_Switch'])
+        #填充这一行内容
         row.name = self.name
         for col, val in self.columns.items():
             setattr(row, col, val)
+        #创建的行，会生成一个uuid,保存此uuid
         self.result = row.uuid
 
     def post_commit(self, txn):
+        #完成提交后，如果插入成功，记录可能会生成新的uuid,返回生成的实际uuid
         self.result = txn.get_insert_uuid(self.result)
 
 

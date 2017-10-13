@@ -57,7 +57,7 @@ class OVNGatewayScheduler(object):
         # on them also?
         if existing_chassis and (not candidates or
            not (set(existing_chassis) - set(candidates))):
-            return existing_chassis#有效的chassis不变更
+            return existing_chassis #有效的chassis不变更
         if not candidates:
             return [ovn_const.OVN_GATEWAY_INVALID_CHASSIS]
         # The actual binding of the gateway to a chassis via the options

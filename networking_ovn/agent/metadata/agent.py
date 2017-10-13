@@ -21,6 +21,7 @@ from neutron.common import utils
 from neutron_lib import constants as n_const
 from oslo_concurrency import lockutils
 from oslo_log import log
+from ovsdbapp.backend.ovs_idl import event as row_event
 from ovsdbapp.backend.ovs_idl import vlog
 import six
 
@@ -29,7 +30,6 @@ from networking_ovn.agent.metadata import ovsdb
 from networking_ovn.agent.metadata import server as metadata_server
 from networking_ovn.common import config
 from networking_ovn.common import constants as ovn_const
-from networking_ovn.ovsdb import row_event
 
 
 LOG = log.getLogger(__name__)
@@ -210,7 +210,8 @@ class MetadataAgent(object):
         if ip_lib.device_exists(veth_name[0]):
             ip_lib.IPWrapper().del_veth(veth_name[0])
 
-        self.ovs_idl.del_port('br-int', veth_name[0]).execute()
+        self.ovs_idl.del_port(self.conf.ovs_integration_bridge,
+                              veth_name[0]).execute()
         ip.garbage_collect_namespace()
 
     def update_datapath(self, datapath):
@@ -316,7 +317,8 @@ class MetadataAgent(object):
 
         # Configure the OVS port and add external_ids:iface-id so that it
         # can be tracked by OVN.
-        self.ovs_idl.add_port('br-int', veth_name[0]).execute()
+        self.ovs_idl.add_port(self.conf.ovs_integration_bridge,
+                              veth_name[0]).execute()
         self.ovs_idl.db_set(
             'Interface', veth_name[0],
             ('external_ids', {'iface-id': port.logical_port})).execute()

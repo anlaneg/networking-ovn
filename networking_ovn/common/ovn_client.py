@@ -21,6 +21,8 @@ import netaddr
 from neutron.plugins.common import utils as p_utils
 from neutron_lib.api.definitions import l3
 from neutron_lib.api.definitions import port_security as psec
+from neutron_lib.api.definitions import portbindings
+from neutron_lib.api.definitions import provider_net as pnet
 from neutron_lib import constants as const
 from neutron_lib import context as n_context
 from neutron_lib.plugins import directory
@@ -71,13 +73,14 @@ class OVNClient(object):
 
     def _get_allowed_addresses_from_port(self, port):
         if not port.get(psec.PORTSECURITY):
-            return []
+            return [], []
 
         if utils.is_lsp_trusted(port):
             #可信端口不做地址对处理
-            return []
+            return [], []
 
         allowed_addresses = set()
+        new_macs = set()
         #在address中存入自身信息
         addresses = port['mac_address']
         for ip in port.get('fixed_ips', []):
@@ -94,12 +97,13 @@ class OVNClient(object):
             else:
                 allowed_addresses.add(allowed_address['mac_address'] + ' ' +
                                       allowed_address['ip_address'])
+                new_macs.add(allowed_address['mac_address'])
 
         #合并此信息
         allowed_addresses.add(addresses)
 
         #最终结果 mac + ' ' + ip1 + ' ' + ip2 + ....
-        return list(allowed_addresses)
+        return list(allowed_addresses), list(new_macs)
 
     def _get_subnet_dhcp_options_for_port(self, port, ip_version):
         """Returns the subnet dhcp options for the port.
@@ -188,7 +192,7 @@ class OVNClient(object):
             port_type = 'vtep' #用户通过profile指定了此port,将此port类型置为vtep(用于将物理交换机做网关情况）
             options = {'vtep-physical-switch': vtep_physical_switch,
                        'vtep-logical-switch': vtep_logical_switch}
-            addresses = "unknown"
+            addresses = ["unknown"]
             parent_name = []
             tag = []
             port_security = []
@@ -196,21 +200,27 @@ class OVNClient(object):
             options = qos_options
             parent_name = binding_prof.get('parent_name', [])
             tag = binding_prof.get('tag', [])
-            addresses = port['mac_address']
+            address = port['mac_address']
             for ip in port.get('fixed_ips', []):
-                addresses += ' ' + ip['ip_address']
+                address += ' ' + ip['ip_address']
                 subnet = self._plugin.get_subnet(n_context.get_admin_context(),
                                                  ip['subnet_id'])
                 cidrs += ' {}/{}'.format(ip['ip_address'],
                                          subnet['cidr'].split('/')[1])
-            port_security = self._get_allowed_addresses_from_port(port)
+            port_security, new_macs = \
+                self._get_allowed_addresses_from_port(port)
+            addresses = [address]
+            addresses.extend(new_macs)
             port_type = ovn_const.OVN_NEUTRON_OWNER_TO_PORT_TYPE.get(
                 port['device_owner'], '')
 
         dhcpv4_options = self._get_port_dhcp_options(port, const.IP_VERSION_4)
         dhcpv6_options = self._get_port_dhcp_options(port, const.IP_VERSION_6)
 
-        return OvnPortInfo(port_type, options, [addresses], port_security,
+        options.update({'requested-chassis':
+                        port.get(portbindings.HOST_ID, '')})
+
+        return OvnPortInfo(port_type, options, addresses, port_security,
                            parent_name, tag, dhcpv4_options, dhcpv6_options,
                            cidrs.strip())
 
@@ -267,7 +277,8 @@ class OVNClient(object):
 
             #空的acl
             acls_new = ovn_acl.add_acls(self._plugin, admin_context,
-                                        port, sg_cache, subnet_cache)
+                                        port, sg_cache, subnet_cache,
+                                        self._nb_idl)
             for acl in acls_new:
                 txn.add(self._nb_idl.add_acl(**acl))
 
@@ -344,6 +355,9 @@ class OVNClient(object):
             attached_sg_ids = new_sg_ids - old_sg_ids
             is_fixed_ips_updated = \
                 original_port.get('fixed_ips') != port.get('fixed_ips')
+            is_allowed_ips_updated = \
+                original_port.get('allowed_address_pairs') != \
+                port.get('allowed_address_pairs')
 
             # Refresh ACLs for changed security groups or fixed IPs.
             if detached_sg_ids or attached_sg_ids or is_fixed_ips_updated:
@@ -354,7 +368,8 @@ class OVNClient(object):
                                             admin_context,
                                             port,
                                             sg_cache,
-                                            subnet_cache)
+                                            subnet_cache,
+                                            self._nb_idl)
                 txn.add(self._nb_idl.update_acls([port['network_id']],
                                                  [port],
                                                  {port['id']: acls_new},
@@ -382,7 +397,7 @@ class OVNClient(object):
                                 addrs_add=None,
                                 addrs_remove=addresses_old[ip_version]))
 
-                if is_fixed_ips_updated:
+                if is_fixed_ips_updated or is_allowed_ips_updated:
                     # We have refreshed address sets for attached and detached
                     # security groups, so now we only need to take care of
                     # unchanged security groups.
@@ -702,7 +717,8 @@ class OVNClient(object):
         update = {}
         router_name = utils.ovn_name(router_id)
         enabled = delta['router'].get('admin_state_up')
-        if enabled and enabled != original_router['admin_state_up']:
+        if enabled is not None and (
+                enabled != original_router['admin_state_up']):
             update['enabled'] = enabled
 
         # Check for change in name
@@ -741,6 +757,17 @@ class OVNClient(object):
         with self._nb_idl.transaction(check_error=True) as txn:
             txn.add(self._nb_idl.delete_lrouter(lrouter_name))
 
+    def get_candidates_for_scheduling(self, extnet):
+        if extnet.get(pnet.NETWORK_TYPE) in [const.TYPE_FLAT,
+                                             const.TYPE_VLAN]:
+            physnet = extnet.get(pnet.PHYSICAL_NETWORK)
+            if not physnet:
+                return []
+            chassis_physnets = self._sb_idl.get_chassis_and_physnets()
+            return [chassis for chassis, physnets in chassis_physnets.items()
+                    if physnet in physnets]
+        return []
+
     def create_router_port(self, router_id, port):
         """Create a logical router port."""
         lrouter = utils.ovn_name(router_id)
@@ -751,12 +778,16 @@ class OVNClient(object):
             'device_owner') #检查此接口是否为gateway-port
         columns = {}
         if is_gw_port:
+            context = n_context.get_admin_context()
             #对gateway进行调度，并选择chassis
+            candidates = self.get_candidates_for_scheduling(
+                self._plugin.get_network(context, port['network_id']))
             selected_chassis = self._ovn_scheduler.select(
-                self._nb_idl, self._sb_idl, lrouter_port_name)
-            columns['options'] = {
+                self._nb_idl, self._sb_idl, lrouter_port_name,
+                candidates=candidates)
+            if selected_chassis:
                 #标记这个gateway放在那个chassis上
-                ovn_const.OVN_GATEWAY_CHASSIS_KEY: selected_chassis}
+                columns['gateway_chassis'] = selected_chassis
         with self._nb_idl.transaction(check_error=True) as txn:
             #在路由器上加入此接口
             txn.add(self._nb_idl.add_lrouter_port(name=lrouter_port_name,
@@ -766,7 +797,7 @@ class OVNClient(object):
                                                   **columns))
             #加入交换机上与路由器相连的口
             txn.add(self._nb_idl.set_lrouter_port_in_lswitch_port(
-                port['id'], lrouter_port_name))
+                port['id'], lrouter_port_name, is_gw_port))
 
     def update_router_port(self, router_id, port, networks=None):
         """Update a logical router port."""
@@ -775,6 +806,8 @@ class OVNClient(object):
 
         lrouter_port_name = utils.ovn_lrouter_port_name(port['id'])
         update = {'networks': networks}
+        is_gw_port = const.DEVICE_OWNER_ROUTER_GW == port.get(
+            'device_owner')
         with self._nb_idl.transaction(check_error=True) as txn:
             #更新路由port的networks字段
             txn.add(self._nb_idl.update_lrouter_port(name=lrouter_port_name,
@@ -782,7 +815,7 @@ class OVNClient(object):
                                                      **update))
             #在networks对应的交换机上添加相应的接口
             txn.add(self._nb_idl.set_lrouter_port_in_lswitch_port(
-                    port['id'], lrouter_port_name))
+                    port['id'], lrouter_port_name, is_gw_port))
 
     def delete_router_port(self, port_id, router_id):
         """Delete a logical router port."""
@@ -837,15 +870,9 @@ class OVNClient(object):
                 tag = int(segid) if segid else None
                 self._create_provnet_port(txn, network, physnet, tag)
 
-        if config.is_ovn_metadata_enabled():
-            #如果metadata被启用，则创建相应的dhcp接口
-            # Create a neutron port for DHCP/metadata services
-            port = {'port':
-                    {'network_id': network['id'],
-                     'tenant_id': '',
-                     'device_owner': const.DEVICE_OWNER_DHCP}}
-            p_utils.create_port(self._plugin, n_context.get_admin_context(),
-                                port)
+        #如果metadata被启用，则创建相应的dhcp接口
+        self.create_metadata_port(n_context.get_admin_context(), network)
+
         return network
 
     def delete_network(self, network_id):
@@ -1119,13 +1146,15 @@ class OVNClient(object):
         self._process_security_group_rule(rule, is_add_acl=False)
 
     def _find_metadata_port(self, context, network_id):
+        if not config.is_ovn_metadata_enabled():
+            return
+
         ports = self._plugin.get_ports(context, filters=dict(
-            network_id=[network_id], device_owner=['network:dhcp']))
+            network_id=[network_id], device_owner=[const.DEVICE_OWNER_DHCP]))
         # There should be only one metadata port per network
         if len(ports) == 1:
             #每个network中只能有一个
             return ports[0]
-        LOG.error("Metadata port couldn't be found for network %s", network_id)
 
     def _find_metadata_port_ip(self, context, subnet):
         metadata_port = self._find_metadata_port(context, subnet['network_id'])
@@ -1134,16 +1163,43 @@ class OVNClient(object):
                 if fixed_ip['subnet_id'] == subnet['id']:
                     return fixed_ip['ip_address']
 
+    def _get_metadata_ports(self, context, network_id):
+        if not config.is_ovn_metadata_enabled():
+            return
+
+        return self._plugin.get_ports(context, filters=dict(
+            network_id=[network_id], device_owner=[const.DEVICE_OWNER_DHCP]))
+
+    def create_metadata_port(self, context, network):
+        if config.is_ovn_metadata_enabled():
+            metadata_ports = self._get_metadata_ports(context, network['id'])
+            if not metadata_ports:
+                # Create a neutron port for DHCP/metadata services
+                port = {'port':
+                        {'network_id': network['id'],
+                         'tenant_id': network['project_id'],
+                         'device_owner': const.DEVICE_OWNER_DHCP}}
+                p_utils.create_port(self._plugin, context, port)
+            elif len(metadata_ports) > 1:
+                LOG.error("More than one metadata ports found for network %s. "
+                          "Please run the neutron-ovn-db-sync-util to fix it.",
+                          network['id'])
+
     def update_metadata_port(self, context, network_id):
         """Update metadata port.
 
         This function will allocate an IP address for the metadata port of
         the given network in all its IPv4 subnets.
         """
+        if not config.is_ovn_metadata_enabled():
+            return
+
         # Retrieve the metadata port of this network
         # 找出此network中的metadata_port,每个network_id中仅需要存在一个
         metadata_port = self._find_metadata_port(context, network_id)
         if not metadata_port:
+            LOG.error("Metadata port couldn't be found for network %s",
+                      network_id)
             return
 
         # Retrieve all subnets in this network
@@ -1178,3 +1234,6 @@ class OVNClient(object):
                              'fixed_ips': wanted_fixed_ips}}
             self._plugin.update_port(n_context.get_admin_context(),
                                      metadata_port['id'], port)
+
+    def get_parent_port(self, port_id):
+        return self._nb_idl.get_parent_port(port_id)

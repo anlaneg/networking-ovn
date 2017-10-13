@@ -293,7 +293,8 @@ class TestOvnNbSyncML2(test_mech_driver.OVNMechanismDriverTestCase):
 
         self.lrport_networks = ['fdad:123:456::1/64', 'fdad:cafe:a1b2::1/64']
 
-    def _fake_get_ovn_dhcp_options(self, subnet, network, server_mac=None):
+    def _fake_get_ovn_dhcp_options(self, subnet, network, server_mac=None,
+                                   metadata_port_ip=None):
         if subnet['id'] == 'n1-s1':
             return {'cidr': '10.0.0.0/24',
                     'options': {'server_id': '10.0.0.1',
@@ -483,6 +484,7 @@ class TestOvnNbSyncML2(test_mech_driver.OVNMechanismDriverTestCase):
 
         core_plugin = ovn_nb_synchronizer.core_plugin
         ovn_api = ovn_nb_synchronizer.ovn_api
+        mock.patch("networking_ovn.ovsdb.impl_idl_ovn.get_connection").start()
 
         ovn_nb_synchronizer.do_sync()
 
@@ -635,7 +637,7 @@ class TestOvnNbSyncML2(test_mech_driver.OVNMechanismDriverTestCase):
             ovn_nb_synchronizer._ovn_client._add_subnet_dhcp_options.
             call_count)
         add_subnet_dhcp_options_calls = [
-            mock.call(subnet, net, mock.ANY)
+            mock.call(subnet, net, mock.ANY, metadata_port_ip=mock.ANY)
             for (subnet, net) in add_subnet_dhcp_options_list]
         ovn_nb_synchronizer._ovn_client._add_subnet_dhcp_options. \
             assert_has_calls(add_subnet_dhcp_options_calls, any_order=True)

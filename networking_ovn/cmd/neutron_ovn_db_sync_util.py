@@ -17,6 +17,7 @@ from oslo_config import cfg
 from oslo_db import options as db_options
 from oslo_log import log as logging
 
+from neutron.common import topics
 from neutron.conf.agent import securitygroups_rpc
 from neutron import manager
 from neutron import opts as neutron_options
@@ -36,7 +37,9 @@ class Ml2Plugin(ml2_plugin.Ml2Plugin):
         pass
 
     def _start_rpc_notifiers(self):
-        pass
+        # Override the notifier so that when calling the ML2 plugin to create
+        # resources, it doesn't crash trying to notify subscribers.
+        self.notifier = AgentNotifierApi(topics.AGENT)
 
 
 class OVNMechanismDriver(mech_driver.OVNMechanismDriver):
@@ -45,6 +48,67 @@ class OVNMechanismDriver(mech_driver.OVNMechanismDriver):
         pass
 
     def post_fork_initialize(self, resource, event, trigger, **kwargs):
+        pass
+
+    # Since we are not using the networking_ovn mechanism driver while syncing,
+    # we override the post and pre commit methods so that original ones are
+    # not called.
+    def create_port_precommit(self, context):
+        pass
+
+    def create_port_postcommit(self, context):
+        pass
+
+    def update_port_precommit(self, context):
+        pass
+
+    def update_port_postcommit(self, context):
+        pass
+
+    def delete_port_precommit(self, context):
+        pass
+
+    def delete_port_postcommit(self, context):
+        pass
+
+
+class AgentNotifierApi(object):
+    """Default Agent Notifier class for ovn-db-sync-util.
+
+    This class implements empty methods so that when creating resources in
+    the core plugin, the original ones don't get called and don't interfere
+    with the syncing process.
+    """
+    def __init__(self, topic):
+        self.topic = topic
+        self.topic_network_delete = topics.get_topic_name(topic,
+                                                          topics.NETWORK,
+                                                          topics.DELETE)
+        self.topic_port_update = topics.get_topic_name(topic,
+                                                       topics.PORT,
+                                                       topics.UPDATE)
+        self.topic_port_delete = topics.get_topic_name(topic,
+                                                       topics.PORT,
+                                                       topics.DELETE)
+        self.topic_network_update = topics.get_topic_name(topic,
+                                                          topics.NETWORK,
+                                                          topics.UPDATE)
+
+    def network_delete(self, context, network_id):
+        pass
+
+    def port_update(self, context, port, network_type, segmentation_id,
+                    physical_network):
+        pass
+
+    def port_delete(self, context, port_id):
+        pass
+
+    def network_update(self, context, network):
+        pass
+
+    def security_groups_provider_updated(self, context,
+                                         devices_to_udpate=None):
         pass
 
 
@@ -110,15 +174,30 @@ def main():
         LOG.error('Invalid --ovn-ovn_nb_connection parameter provided.')
         return
 
+    try:
+        sb_conn = impl_idl_ovn.get_connection(impl_idl_ovn.OvsdbSbOvnIdl)
+        ovn_sb_api = impl_idl_ovn.OvsdbSbOvnIdl(sb_conn)
+    except RuntimeError:
+        LOG.error('Invalid --ovn-ovn_sb_connection parameter provided.')
+        return
+
     manager.init()
     core_plugin = directory.get_plugin()
     ovn_driver = core_plugin.mechanism_manager.mech_drivers['ovn-sync'].obj
     ovn_driver._nb_ovn = ovn_api
+    ovn_driver._sb_ovn = ovn_sb_api
 
     #北向库同步
     synchronizer = ovn_db_sync.OvnNbSynchronizer(
         core_plugin, ovn_api, mode, ovn_driver)
 
-    LOG.info('Sync started with mode : %s', mode)
+    LOG.info('Sync for Northbound db started with mode : %s', mode)
     synchronizer.do_sync()
-    LOG.info('Sync completed')
+    LOG.info('Sync completed for Northbound db')
+
+    sb_synchronizer = ovn_db_sync.OvnSbSynchronizer(
+        core_plugin, ovn_sb_api, ovn_driver)
+
+    LOG.info('Sync for Southbound db started with mode : %s', mode)
+    sb_synchronizer.do_sync()
+    LOG.info('Sync completed for Southbound db')

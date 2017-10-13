@@ -41,6 +41,9 @@ class OVNL3RouterPlugin(test_mech_driver.OVNMechanismDriverTestCase):
 
     def setUp(self):
         super(OVNL3RouterPlugin, self).setUp()
+        network_attrs = {'router:external': True}
+        self.fake_network = \
+            fakes.FakeNetwork.create_one_network(attrs=network_attrs).info()
         self.fake_router_port = {'device_id': '',
                                  'device_owner': 'network:router_interface',
                                  'mac_address': 'aa:aa:aa:aa:aa:aa',
@@ -94,34 +97,23 @@ class OVNL3RouterPlugin(test_mech_driver.OVNMechanismDriverTestCase):
                                  'fixed_ips': [{'ip_address': '192.168.1.1',
                                                 'subnet_id': 'ext-subnet-id'}],
                                  'mac_address': '00:00:00:02:04:06',
+                                 'network_id': self.fake_network['id'],
                                  'id': 'gw-port-id'}
         self.fake_ext_gw_port_assert = {'lrouter': 'neutron-router-id',
                                         'mac': '00:00:00:02:04:06',
                                         'name': 'lrp-gw-port-id',
                                         'networks': ['192.168.1.1/24'],
-                                        'options': {'redirect-chassis': 'hv1'}}
-        self.fake_floating_ip = {'id': 'fip-id',
-                                 'tenant_id': '',
-                                 'floating_ip_address': '192.168.0.10',
-                                 'floating_network_id': 'fip-net-id',
-                                 'router_id': 'router-id',
-                                 # API level attribute
-                                 'port_id': 'port_id',
-                                 'fixed_port_id': 'port_id',
-                                 'floating_port_id': 'fip-port-id',
-                                 'fixed_ip_address': '10.0.0.10',
-                                 'status': 'Active'}
-        self.fake_floating_ip_new = {'id': 'fip-id',
-                                     'tenant_id': '',
-                                     'floating_ip_address': '192.168.0.10',
-                                     'floating_network_id': 'fip-net-id',
-                                     'router_id': 'new-router-id',
-                                     # API level attribute
-                                     'port_id': 'new-port_id',
-                                     'fixed_port_id': 'new-port_id',
-                                     'floating_port_id': 'fip-port-id',
-                                     'fixed_ip_address': '10.10.10.10',
-                                     'status': 'Active'}
+                                        'gateway_chassis': ['hv1']}
+        self.fake_floating_ip_attrs = {'floating_ip_address': '192.168.0.10',
+                                       'fixed_ip_address': '10.0.0.10'}
+        self.fake_floating_ip = fakes.FakeFloatingIp.create_one_fip(
+            attrs=self.fake_floating_ip_attrs)
+        self.fake_floating_ip_new_attrs = {
+            'router_id': 'new-router-id',
+            'floating_ip_address': '192.168.0.10',
+            'fixed_ip_address': '10.10.10.10'}
+        self.fake_floating_ip_new = fakes.FakeFloatingIp.create_one_fip(
+            attrs=self.fake_floating_ip_new_attrs)
         self.l3_inst = directory.get_plugin(plugin_constants.L3)
         self._start_mock(
             'networking_ovn.l3.l3_ovn.OVNL3RouterPlugin._ovn',
@@ -131,6 +123,9 @@ class OVNL3RouterPlugin(test_mech_driver.OVNMechanismDriverTestCase):
             'networking_ovn.l3.l3_ovn.OVNL3RouterPlugin._sb_ovn',
             new_callable=mock.PropertyMock,
             return_value=fakes.FakeOvsdbSbOvnIdl())
+        self._start_mock(
+            'neutron.plugins.ml2.plugin.Ml2Plugin.get_network',
+            return_value=self.fake_network)
         self._start_mock(
             'neutron.db.db_base_plugin_v2.NeutronDbPluginV2.get_port',
             return_value=self.fake_router_port)
@@ -153,9 +148,13 @@ class OVNL3RouterPlugin(test_mech_driver.OVNMechanismDriverTestCase):
             'neutron.db.l3_db.L3_NAT_dbonly_mixin.delete_router',
             return_value={})
         self._start_mock(
+            'networking_ovn.common.ovn_client.'
+            'OVNClient.get_candidates_for_scheduling',
+            return_value=[])
+        self._start_mock(
             'networking_ovn.l3.l3_ovn_scheduler.'
             'OVNGatewayLeastLoadedScheduler._schedule_gateway',
-            return_value='hv1')
+            return_value=['hv1'])
         self._start_mock(
             'neutron.db.l3_db.L3_NAT_dbonly_mixin.create_floatingip',
             return_value=self.fake_floating_ip)
@@ -173,7 +172,8 @@ class OVNL3RouterPlugin(test_mech_driver.OVNMechanismDriverTestCase):
         self.l3_inst._ovn.add_lrouter_port.assert_called_once_with(
             **self.fake_router_port_assert)
         self.l3_inst._ovn.set_lrouter_port_in_lswitch_port.\
-            assert_called_once_with('router-port-id', 'lrp-router-port-id')
+            assert_called_once_with('router-port-id', 'lrp-router-port-id',
+                                    False)
 
     @mock.patch('neutron.db.l3_db.L3_NAT_dbonly_mixin.add_router_interface')
     @mock.patch('neutron.db.db_base_plugin_v2.NeutronDbPluginV2.get_port')
@@ -207,7 +207,8 @@ class OVNL3RouterPlugin(test_mech_driver.OVNMechanismDriverTestCase):
         self.assertItemsEqual(fake_rtr_intf_networks,
                               called_args_dict.get('networks', []))
         self.l3_inst._ovn.set_lrouter_port_in_lswitch_port.\
-            assert_called_once_with('router-port-id', 'lrp-router-port-id')
+            assert_called_once_with('router-port-id', 'lrp-router-port-id',
+                                    False)
 
     @mock.patch('neutron.db.db_base_plugin_v2.NeutronDbPluginV2.get_port')
     def test_remove_router_interface(self, getp):

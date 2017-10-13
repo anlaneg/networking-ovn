@@ -194,13 +194,18 @@ class API(api.API):
         """
 
     @abc.abstractmethod
-    def set_lrouter_port_in_lswitch_port(self, lswitch_port, lrouter_port):
+    def set_lrouter_port_in_lswitch_port(self, lswitch_port, lrouter_port,
+                                         is_gw_port=False, if_exists=True):
         """Create a command to set lswitch_port as lrouter_port
 
         :param lswitch_port: The name of logical switch port
         :type lswitch_port:  string
         :param lrouter_port: The name of logical router port
         :type lrouter_port:  string
+        :param is_gw_port:   True if logical router port is gw port
+        :type is_gw_port:    bool
+        :param if_exists:    Do not fail if the lswitch port does not exist
+        :type if_exists:     bool
         :returns:            :class:`Command` with no result
         """
 
@@ -349,12 +354,13 @@ class API(api.API):
         """
 
     @abc.abstractmethod
-    def get_unhosted_gateways(self, valid_chassis_list):
-        """Return a dictionary of gateways not hosted on chassis
+    def get_unhosted_gateways(self, port_physnet_dict, chassis_physnets):
+        """Return a list of gateways not hosted on chassis
 
-        :param valid_chassis_list: List of valid chassis
-        :returns:                   List of gateways not hosted on a valid
-                                   chassis
+        :param port_physnet_dict: Dictionary of gateway ports and their physnet
+        :param chassis_physnets:  Dictionary of chassis and physnets
+        :returns:                 List of gateways not hosted on a valid
+                                  chassis
         """
 
     @abc.abstractmethod
@@ -542,6 +548,14 @@ class SbAPI(api.API):
 
         Hostname will be dict key, and a list of physnets will be dict
         value. And hostname and physnets are related to the same host.
+        """
+
+    @abc.abstractmethod
+    def get_chassis_and_physnets(self):
+        """Return a dict contains chassis name and physnets mapping.
+
+        Chassis name will be dict key, and a list of physnets will be dict
+        value. And chassis name and physnets are related to the same chassis.
         """
 
     @abc.abstractmethod

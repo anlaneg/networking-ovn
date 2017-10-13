@@ -31,6 +31,42 @@ from networking_ovn.ovsdb import ovsdb_monitor
 
 LOG = log.getLogger(__name__)
 
+from ovsdbapp.backend import ovs_idl
+
+
+# This version of Backend doesn't use a class variable for ovsdb_connection
+# and therefor allows networking-ovn to manage connection scope on its own
+class Backend(ovs_idl.Backend):
+    lookup_table = {}
+
+    def __init__(self, connection):
+        self.ovsdb_connection = connection
+        super(Backend, self).__init__(connection)
+
+    def start_connection(self, connection):
+        try:
+            self.ovsdb_connection.start()
+        except Exception as e:
+            connection_exception = OvsdbConnectionUnavailable(
+                db_schema=self.schema, error=e)
+            LOG.exception(connection_exception)
+            raise connection_exception
+
+    @property
+    def idl(self):
+        return self.ovsdb_connection.idl
+
+    @property
+    def tables(self):
+        return self.idl.tables
+
+    _tables = tables
+
+    def create_transaction(self, check_error=False, log_errors=True):
+        return idl_trans.Transaction(
+            self, self.ovsdb_connection, self.ovsdb_connection.timeout,
+            check_error, log_errors)
+
 
 class OvsdbConnectionUnavailable(n_exc.ServiceUnavailable):
     message = _("OVS database connection to %(db_schema)s failed with error: "
@@ -68,47 +104,26 @@ def get_connection(db_class, trigger=None, driver=None):
     if trigger and trigger.im_class == ovsdb_monitor.OvnWorker:
         idl_ = cls.from_server(*args, driver=driver)
     else:
-        #非OvnWorker trigger情况下，直接传入args
-        #对应的是ovsdb_monitor.BaseOvnIdl将创建相应idl_
-        idl_ = ovsdb_monitor.BaseOvnIdl.from_server(*args)
+        if db_class == OvsdbSbOvnIdl:
+            idl_ = ovsdb_monitor.BaseOvnSbIdl.from_server(*args)
+        else:
+            #非OvnWorker trigger情况下，直接传入args
+            #对应的是ovsdb_monitor.BaseOvnIdl将创建相应idl_
+
+            idl_ = ovsdb_monitor.BaseOvnIdl.from_server(*args)
     return connection.Connection(idl_, timeout=cfg.get_ovn_ovsdb_timeout())
 
 
-class OvsdbNbOvnIdl(ovn_api.API):
+class OvsdbNbOvnIdl(Backend, ovn_api.API):
     #北向api接口
-
+    schema = 'OVN_Northbound'
+>>>>>>> upstream/master
     ovsdb_connection = None
 
     def __init__(self, connection):
-        super(OvsdbNbOvnIdl, self).__init__()
-        try:
-            if OvsdbNbOvnIdl.ovsdb_connection is None:
-                OvsdbNbOvnIdl.ovsdb_connection = connection
-            OvsdbNbOvnIdl.ovsdb_connection.start()
-            self.idl = OvsdbNbOvnIdl.ovsdb_connection.idl
-            self.ovsdb_timeout = cfg.get_ovn_ovsdb_timeout()
-
-            # FIXME(lucasagomes): We should not access the _session
-            # private attribute like this, ideally the IDL class would
-            # expose a public method to allow others to tune the probe
-            # interval. This shoule be done in the OVS python library.
-            self.idl._session.reconnect.set_probe_interval(
-                cfg.get_ovn_ovsdb_probe_interval())
-        except Exception as e:
-            connection_exception = OvsdbConnectionUnavailable(
-                db_schema='OVN_Northbound', error=e)
-            LOG.exception(connection_exception)
-            raise connection_exception
-
-    @property
-    def _tables(self):
-        return self.idl.tables
-
-    def create_transaction(self, check_error=False, log_errors=True, **kwargs):
-        return idl_trans.Transaction(self,
-                                     OvsdbNbOvnIdl.ovsdb_connection,
-                                     self.ovsdb_timeout,
-                                     check_error, log_errors)
+        super(OvsdbNbOvnIdl, self).__init__(connection)
+        self.idl._session.reconnect.set_probe_interval(
+            cfg.get_ovn_ovsdb_probe_interval())
 
     def create_lswitch(self, lswitch_name, may_exist=True, **columns):
         return cmd.AddLSwitchCommand(self, lswitch_name,
@@ -278,10 +293,11 @@ class OvsdbNbOvnIdl(ovn_api.API):
                                          if_exists)
 
     def set_lrouter_port_in_lswitch_port(self, lswitch_port, lrouter_port,
-                                         if_exists=True):
+                                         is_gw_port=False, if_exists=True):
         #在交换机上添加与路由器相连的口
         return cmd.SetLRouterPortInLSwitchPortCommand(self, lswitch_port,
-                                                      lrouter_port, if_exists)
+                                                      lrouter_port, is_gw_port,
+                                                      if_exists)
 
     def add_acl(self, lswitch, lport, **columns):
         return cmd.AddACLCommand(self, lswitch, lport, **columns)
@@ -318,6 +334,26 @@ class OvsdbNbOvnIdl(ovn_api.API):
         return cmd.UpdateAddrSetExtIdsCommand(self, name, external_ids,
                                               if_exists)
 
+    def _get_logical_router_port_gateway_chassis(self, lrp):
+        # Try retrieving gateway_chassis with new schema. If new schema is not
+        # supported or user is using old schema, then use old schema for
+        # getting gateway_chassis
+        chassis = []
+        if self._tables.get('Gateway_Chassis'):
+            for gwc in lrp.gateway_chassis:
+                # TODO(anilvenkata): Add to the list based on priority.
+                # Otherwise, if lrp1 is scheduled on c1 with priority 1 and c2
+                # with priority 2. When new port lrp2 is scheduled, it is also
+                # scheduled on c1 with priority 1 and c2 with priority 2.
+                # If we add to the list based on priority then it will be
+                # scheduled on c1 with priority 2 and on c2 with priority 1.
+                chassis.append(gwc.chassis_name)
+        else:
+            rc = lrp.options.get(ovn_const.OVN_GATEWAY_CHASSIS_KEY)
+            if rc:
+                chassis.append(rc)
+        return chassis
+
     def get_all_chassis_gateway_bindings(self,
                                          chassis_candidate_list=None):
         chassis_bindings = {}
@@ -326,48 +362,40 @@ class OvsdbNbOvnIdl(ovn_api.API):
         for lrp in self._tables['Logical_Router_Port'].rows.values():
             if not lrp.name.startswith('lrp-'):
                 continue
-            #检查此lrp已绑定在那个chassis上了
-            chassis_name = lrp.options.get(ovn_const.OVN_GATEWAY_CHASSIS_KEY)
-            if not chassis_name:
-                continue
-            if (not chassis_candidate_list or
-                    chassis_name in chassis_candidate_list):
-                routers_hosted = chassis_bindings.setdefault(chassis_name, [])
-                routers_hosted.append(lrp.name)
+            chassis = self._get_logical_router_port_gateway_chassis(lrp)
+            for chassis_name in chassis:
+                if (not chassis_candidate_list or
+                        chassis_name in chassis_candidate_list):
+                    routers_hosted = chassis_bindings.setdefault(chassis_name,
+                                                                 [])
+                    routers_hosted.append(lrp.name)
         return chassis_bindings
 
     def get_gateway_chassis_binding(self, gateway_name):
         try:
-            #拿到指定port(文中名称有误），且port为gateway port
-            # 如果它没有绑定，返回NULL，否则返回绑定的chassis
-            router = idlutils.row_by_value(self.idl,
-                                           'Logical_Router_Port',
-                                           'name',
-                                           gateway_name)
-            chassis_name = router.options.get(
-                ovn_const.OVN_GATEWAY_CHASSIS_KEY)
-            if chassis_name == ovn_const.OVN_GATEWAY_INVALID_CHASSIS:
-                return None
-            else:
-                return chassis_name
+            lrp = idlutils.row_by_value(
+                self.idl, 'Logical_Router_Port', 'name', gateway_name)
+            return self._get_logical_router_port_gateway_chassis(lrp)
         except idlutils.RowNotFound:
-            return None
+            return []
 
-    def get_unhosted_gateways(self, valid_chassis_list):
-        unhosted_gateways = {}
+    def get_unhosted_gateways(self, port_physnet_dict, chassis_physnets):
+        unhosted_gateways = []
+        valid_chassis_list = list(chassis_physnets)
         for lrp in self._tables['Logical_Router_Port'].rows.values():
             if not lrp.name.startswith('lrp-'):
                 continue
-            chassis_name = lrp.options.get(ovn_const.OVN_GATEWAY_CHASSIS_KEY)
-            if not chassis_name:
-                # Not a gateway router
-                continue
-            # TODO(azbiswas): Handle the case when a chassis is no
-            # longer valid. This may involve moving conntrack states,
-            # so it needs to discussed in the OVN community first.
-            if (chassis_name == ovn_const.OVN_GATEWAY_INVALID_CHASSIS or
-                    chassis_name not in valid_chassis_list):
-                unhosted_gateways[lrp.name] = lrp.options
+            physnet = port_physnet_dict.get(lrp.name[len('lrp-'):])
+            for chassis_name in self._get_logical_router_port_gateway_chassis(
+                    lrp):
+                # TODO(azbiswas): Handle the case when a chassis is no
+                # longer valid. This may involve moving conntrack states,
+                # so it needs to discussed in the OVN community first.
+                if (chassis_name == ovn_const.OVN_GATEWAY_INVALID_CHASSIS or
+                        chassis_name not in valid_chassis_list or
+                        (physnet and
+                         physnet not in chassis_physnets.get(chassis_name))):
+                    unhosted_gateways.append(lrp.name)
         return unhosted_gateways
 
     def add_dhcp_options(self, subnet_id, port_id=None, may_exists=True,
@@ -480,7 +508,7 @@ class OvsdbNbOvnIdl(ovn_api.API):
             lsp = idlutils.row_by_value(self.idl, 'Logical_Switch_Port',
                                         'name', lsp_name)
             options = getattr(lsp, 'options')
-            for key in options.keys():
+            for key in list(options.keys()):
                 if key not in ovn_const.OVN_ROUTER_PORT_OPTION_KEYS:
                     del(options[key])
             return options
@@ -523,6 +551,14 @@ class OvsdbNbOvnIdl(ovn_api.API):
     def delete_nat_ip_from_lrport_peer_options(self, lport, nat_ip):
         return cmd.DeleteNatIpFromLRPortPeerOptionsCommand(self, lport, nat_ip)
 
+    def get_parent_port(self, lsp_name):
+        try:
+            lsp = idlutils.row_by_value(self.idl, 'Logical_Switch_Port',
+                                        'name', lsp_name)
+            return lsp.parent_name
+        except idlutils.RowNotFound:
+            return ''
+
     # Check for a column match in the table. If not found do a retry with
     # a stop delay of 10 secs. This function would be useful if the caller
     # wants to verify for the presence of a particular row in the table
@@ -542,36 +578,14 @@ class OvsdbNbOvnIdl(ovn_api.API):
             raise RuntimeError(msg)
 
 
-class OvsdbSbOvnIdl(ovn_api.SbAPI):
-
+class OvsdbSbOvnIdl(Backend, ovn_api.SbAPI):
+    schema = 'OVN_Southbound'
     ovsdb_connection = None
 
     def __init__(self, connection):
-        super(OvsdbSbOvnIdl, self).__init__()
-        try:
-            if OvsdbSbOvnIdl.ovsdb_connection is None:
-                OvsdbSbOvnIdl.ovsdb_connection = connection
-            OvsdbSbOvnIdl.ovsdb_connection.start()
-            self.idl = OvsdbSbOvnIdl.ovsdb_connection.idl
-            self.ovsdb_timeout = cfg.get_ovn_ovsdb_timeout()
-
-            # FIXME(lucasagomes): We should not access the _session
-            # private attribute like this, ideally the IDL class would
-            # expose a public method to allow others to tune the probe
-            # interval. This shoule be done in the OVS python library.
-            self.idl._session.reconnect.set_probe_interval(
-                cfg.get_ovn_ovsdb_probe_interval())
-        except Exception as e:
-            connection_exception = OvsdbConnectionUnavailable(
-                db_schema='OVN_Southbound', error=e)
-            LOG.exception(connection_exception)
-            raise connection_exception
-
-    def create_transaction(self, check_error=False, log_errors=True, **kwargs):
-        return idl_trans.Transaction(self,
-                                     OvsdbSbOvnIdl.ovsdb_connection,
-                                     self.ovsdb_timeout,
-                                     check_error, log_errors)
+        super(OvsdbSbOvnIdl, self).__init__(connection)
+        self.idl._session.reconnect.set_probe_interval(
+            cfg.get_ovn_ovsdb_probe_interval())
 
     def _get_chassis_physnets(self, chassis):
         #给出某个chassis上bridge的物理接口映射配置
@@ -595,6 +609,12 @@ class OvsdbSbOvnIdl(ovn_api.SbAPI):
         for ch in self.idl.tables['Chassis'].rows.values():
             #设置每个主机对应的'ovn-bridge-mappings'
             chassis_info_dict[ch.hostname] = self._get_chassis_physnets(ch)
+        return chassis_info_dict
+
+    def get_chassis_and_physnets(self):
+        chassis_info_dict = {}
+        for ch in self.idl.tables['Chassis'].rows.values():
+            chassis_info_dict[ch.name] = self._get_chassis_physnets(ch)
         return chassis_info_dict
 
     def get_all_chassis(self, chassis_type=None):

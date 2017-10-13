@@ -48,20 +48,26 @@ class TestACLs(base.TestCase):
             'ovsdbapp.backend.ovs_idl.idlutils.row_by_value',
             lambda *args, **kwargs: mock.MagicMock())
         patcher.start()
+        mock.patch(
+            "networking_ovn.common.acl._acl_columns_name_severity_supported",
+            return_value=True
+        ).start()
 
     def test_drop_all_ip_traffic_for_port(self):
         acls = ovn_acl.drop_all_ip_traffic_for_port(self.fake_port)
         acl_to_lport = {'action': 'drop', 'direction': 'to-lport',
                         'external_ids': {'neutron:lport':
                                          self.fake_port['id']},
-                        'log': False, 'lport': self.fake_port['id'],
+                        'log': False, 'name': [], 'severity': [],
+                        'lport': self.fake_port['id'],
                         'lswitch': 'neutron-network_id1',
                         'match': 'outport == "fake_port_id1" && ip',
                         'priority': 1001}
         acl_from_lport = {'action': 'drop', 'direction': 'from-lport',
                           'external_ids': {'neutron:lport':
                                            self.fake_port['id']},
-                          'log': False, 'lport': self.fake_port['id'],
+                          'log': False, 'name': [], 'severity': [],
+                          'lport': self.fake_port['id'],
                           'lswitch': 'neutron-network_id1',
                           'match': 'inport == "fake_port_id1" && ip',
                           'priority': 1001}
@@ -83,7 +89,8 @@ class TestACLs(base.TestCase):
                                    self.fake_subnet['cidr'])
         acl_to_lport = {'action': 'allow', 'direction': 'to-lport',
                         'external_ids': {'neutron:lport': 'fake_port_id1'},
-                        'log': False, 'lport': 'fake_port_id1',
+                        'log': False, 'name': [], 'severity': [],
+                        'lport': 'fake_port_id1',
                         'lswitch': 'neutron-network_id1',
                         'match': expected_match_to_lport, 'priority': 1002}
         expected_match_from_lport = (
@@ -93,7 +100,8 @@ class TestACLs(base.TestCase):
         ) % (self.fake_port['id'], self.fake_subnet['cidr'])
         acl_from_lport = {'action': 'allow', 'direction': 'from-lport',
                           'external_ids': {'neutron:lport': 'fake_port_id1'},
-                          'log': False, 'lport': 'fake_port_id1',
+                          'log': False, 'name': [], 'severity': [],
+                          'lport': 'fake_port_id1',
                           'lswitch': 'neutron-network_id1',
                           'match': expected_match_from_lport, 'priority': 1002}
         self.assertEqual(1, len(ovn_dhcp_acls))
@@ -113,7 +121,7 @@ class TestACLs(base.TestCase):
                           'lport': 'port-id',
                           'priority': ovn_const.ACL_PRIORITY_ALLOW,
                           'action': ovn_const.ACL_ACTION_ALLOW_RELATED,
-                          'log': False,
+                          'log': False, 'name': [], 'severity': [],
                           'direction': direction,
                           'match': match,
                           'external_ids': {'neutron:lport': 'port-id'}},
@@ -348,6 +356,38 @@ class TestACLs(base.TestCase):
         sg_rule['protocol'] = str(const.PROTO_NUM_SCTP)
         match = ovn_acl.acl_protocol_and_ports(sg_rule, None)
         self.assertEqual(' && sctp', match)
+
+    def test_acl_protocol_and_ports_for_tcp_udp_and_sctp_number_one(self):
+        sg_rule = {'port_range_min': 22,
+                   'port_range_max': 22}
+
+        sg_rule['protocol'] = str(const.PROTO_NUM_TCP)
+        match = ovn_acl.acl_protocol_and_ports(sg_rule, None)
+        self.assertEqual(' && tcp && tcp.dst == 22', match)
+
+        sg_rule['protocol'] = str(const.PROTO_NUM_UDP)
+        match = ovn_acl.acl_protocol_and_ports(sg_rule, None)
+        self.assertEqual(' && udp && udp.dst == 22', match)
+
+        sg_rule['protocol'] = str(const.PROTO_NUM_SCTP)
+        match = ovn_acl.acl_protocol_and_ports(sg_rule, None)
+        self.assertEqual(' && sctp && sctp.dst == 22', match)
+
+    def test_acl_protocol_and_ports_for_tcp_udp_and_sctp_number_range(self):
+        sg_rule = {'port_range_min': 21,
+                   'port_range_max': 23}
+
+        sg_rule['protocol'] = str(const.PROTO_NUM_TCP)
+        match = ovn_acl.acl_protocol_and_ports(sg_rule, None)
+        self.assertEqual(' && tcp && tcp.dst >= 21 && tcp.dst <= 23', match)
+
+        sg_rule['protocol'] = str(const.PROTO_NUM_UDP)
+        match = ovn_acl.acl_protocol_and_ports(sg_rule, None)
+        self.assertEqual(' && udp && udp.dst >= 21 && udp.dst <= 23', match)
+
+        sg_rule['protocol'] = str(const.PROTO_NUM_SCTP)
+        match = ovn_acl.acl_protocol_and_ports(sg_rule, None)
+        self.assertEqual(' && sctp && sctp.dst >= 21 && sctp.dst <= 23', match)
 
     def test_acl_protocol_and_ports_for_ipv6_icmp_protocol(self):
         sg_rule = {'port_range_min': None,
@@ -600,7 +640,7 @@ class TestACLs(base.TestCase):
                         return_value=False):
             acl_list = ovn_acl.add_acls(self.plugin,
                                         self.admin_context,
-                                        port, {}, {})
+                                        port, {}, {}, self.driver._ovn)
             self.assertEqual([], acl_list)
 
             ovn_acl.update_acls_for_security_group(self.plugin,

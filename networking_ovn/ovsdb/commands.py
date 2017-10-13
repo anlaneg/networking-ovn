@@ -14,6 +14,7 @@ from ovsdbapp.backend.ovs_idl import command
 from ovsdbapp.backend.ovs_idl import idlutils
 
 from networking_ovn._i18n import _
+from networking_ovn.common import constants as ovn_const
 from networking_ovn.common import utils
 
 
@@ -48,6 +49,30 @@ def get_lsp_dhcp_options_uuids(lsp, lsp_name):
         if external_ids.get('port_id') == lsp_name:
             uuids.add(dhcp_opts.uuid)
     return uuids
+
+
+def _add_gateway_chassis(api, txn, lrp_name, val):
+    gateway_chassis = api._tables.get('Gateway_Chassis')
+    if gateway_chassis:
+        prio = len(val)
+        uuid_list = []
+        for chassis in val:
+            gwc_name = '%s_%s' % (lrp_name, chassis)
+            try:
+                gwc = idlutils.row_by_value(api.idl,
+                                            'Gateway_Chassis',
+                                            'name', gwc_name)
+            except idlutils.RowNotFound:
+                gwc = txn.insert(gateway_chassis)
+                gwc.name = gwc_name
+            gwc.chassis_name = chassis
+            gwc.priority = prio
+            prio = prio - 1
+            uuid_list.append(gwc.uuid)
+        return 'gateway_chassis', uuid_list
+    else:
+        chassis = {ovn_const.OVN_GATEWAY_CHASSIS_KEY: val[0]}
+        return 'options', chassis
 
 
 class AddLSwitchCommand(command.BaseCommand):
@@ -336,6 +361,9 @@ class AddLRouterPortCommand(command.BaseCommand):
             lrouter_port = txn.insert(self.api._tables['Logical_Router_Port'])
             lrouter_port.name = self.name
             for col, val in self.columns.items():
+                if col == 'gateway_chassis':
+                    col, val = _add_gateway_chassis(self.api, txn, self.name,
+                                                    val)
                 setattr(lrouter_port, col, val)
             _addvalue_to_list(lrouter, 'ports', lrouter_port)
 
@@ -360,6 +388,9 @@ class UpdateLRouterPortCommand(command.BaseCommand):
 
         if lrouter_port:
             for col, val in self.columns.items():
+                if col == 'gateway_chassis':
+                    col, val = _add_gateway_chassis(self.api, txn, self.name,
+                                                    val)
                 setattr(lrouter_port, col, val)
             return
 
@@ -392,10 +423,11 @@ class DelLRouterPortCommand(command.BaseCommand):
 
 
 class SetLRouterPortInLSwitchPortCommand(command.BaseCommand):
-    def __init__(self, api, lswitch_port, lrouter_port, if_exists):
+    def __init__(self, api, lswitch_port, lrouter_port, is_gw_port, if_exists):
         super(SetLRouterPortInLSwitchPortCommand, self).__init__(api)
         self.lswitch_port = lswitch_port
         self.lrouter_port = lrouter_port
+        self.is_gw_port = is_gw_port
         self.if_exists = if_exists
 
     def run_idl(self, txn):
@@ -409,7 +441,9 @@ class SetLRouterPortInLSwitchPortCommand(command.BaseCommand):
                     "exist") % self.lswitch_port
             raise RuntimeError(msg)
 
-        options = {'router-port': self.lrouter_port} #指出对应的路由器接口名称
+        options = {'router-port': self.lrouter_port}#指出对应的路由器接口名称
+        if self.is_gw_port:
+            options[ovn_const.OVN_GATEWAY_NAT_ADDRESSES_KEY] = 'router'
         setattr(port, 'options', options)
         setattr(port, 'type', 'router')
         setattr(port, 'addresses', 'router') #指明此交换机接口连接的是路由器

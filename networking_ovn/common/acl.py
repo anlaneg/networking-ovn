@@ -122,9 +122,9 @@ def acl_protocol_and_ports(r, icmp):
             match += ' && %s.dst == %d' % (protocol, min_port)
         else:
             if min_port is not None:
-                match += ' && %s >= %d' % (protocol, min_port)
+                match += ' && %s.dst >= %d' % (protocol, min_port)
             if max_port is not None:
-                match += ' && %s <= %d' % (protocol, max_port)
+                match += ' && %s.dst <= %d' % (protocol, max_port)
     elif protocol in ICMP_PROTOCOLS:
         protocol = icmp
         match += ' && %s' % protocol
@@ -149,6 +149,8 @@ def drop_all_ip_traffic_for_port(port):
                "priority": ovn_const.ACL_PRIORITY_DROP,
                "action": ovn_const.ACL_ACTION_DROP,
                "log": False,
+               "name": [],
+               "severity": [],
                "direction": direction,
                "match": '%s == "%s" && ip' % (p, port['id']),
                "external_ids": {'neutron:lport': port['id']}}
@@ -167,6 +169,8 @@ def add_sg_rule_acl_for_port(port, r, match):
            "priority": ovn_const.ACL_PRIORITY_ALLOW,
            "action": ovn_const.ACL_ACTION_ALLOW_RELATED,
            "log": False,
+           "name": [],
+           "severity": [],
            "direction": dir_map[r['direction']],
            "match": match,
            "external_ids": {'neutron:lport': port['id']}}
@@ -185,6 +189,8 @@ def add_acl_dhcp(port, subnet, ovn_dhcp=True):
                "priority": ovn_const.ACL_PRIORITY_ALLOW,
                "action": ovn_const.ACL_ACTION_ALLOW,
                "log": False,
+               "name": [],
+               "severity": [],
                "direction": 'to-lport',
                "match": ('outport == "%s" && ip4 && ip4.src == %s && '
                          'udp && udp.src == 67 && udp.dst == 68'
@@ -196,6 +202,8 @@ def add_acl_dhcp(port, subnet, ovn_dhcp=True):
            "priority": ovn_const.ACL_PRIORITY_ALLOW,
            "action": ovn_const.ACL_ACTION_ALLOW,
            "log": False,
+           "name": [],
+           "severity": [],
            "direction": 'from-lport',
            "match": ('inport == "%s" && ip4 && '
                      'ip4.dst == {255.255.255.255, %s} && '
@@ -271,6 +279,11 @@ def _add_sg_rule_acl_for_port(port, r):
     return add_sg_rule_acl_for_port(port, r, match)
 
 
+def _acl_columns_name_severity_supported(nb_idl):
+    columns = list(nb_idl._tables['ACL'].columns)
+    return ('name' in columns) and ('severity' in columns)
+
+
 def update_acls_for_security_group(plugin,
                                    admin_context,
                                    ovn,
@@ -297,6 +310,8 @@ def update_acls_for_security_group(plugin,
     acl_new_values_dict = {}
     update_port_list = []
 
+    # Check if ACL log name and severity supported or not
+    keep_name_severity = _acl_columns_name_severity_supported(ovn)
     # NOTE(lizk): We can directly locate the affected acl records,
     # so no need to compare new acl values with existing acl objects.
     for port in port_list:
@@ -308,6 +323,10 @@ def update_acls_for_security_group(plugin,
         # Remove lport and lswitch since we don't need them
         acl.pop('lport')
         acl.pop('lswitch')
+        # Remove ACL log name and severity if not supported,
+        if not keep_name_severity:
+            acl.pop('name')
+            acl.pop('severity')
         acl_new_values_dict[port['id']] = acl
 
     if not update_port_list:
@@ -322,7 +341,7 @@ def update_acls_for_security_group(plugin,
                     is_add_acl=is_add_acl).execute(check_error=True)
 
 
-def add_acls(plugin, admin_context, port, sg_cache, subnet_cache):
+def add_acls(plugin, admin_context, port, sg_cache, subnet_cache, ovn):
     acl_list = []
 
     # Skip ACLs if security groups aren't enabled
@@ -362,6 +381,12 @@ def add_acls(plugin, admin_context, port, sg_cache, subnet_cache):
             if acl not in acl_list:
                 acl_list.append(acl)
 
+    # Remove ACL log name and severity if not supported,
+    if not _acl_columns_name_severity_supported(ovn):
+        for acl in acl_list:
+            acl.pop('name')
+            acl.pop('severity')
+
     return acl_list
 
 
@@ -374,6 +399,12 @@ def acl_port_ips(port):
     for fixed_ip in port['fixed_ips']:
         ip_version = netaddr.IPNetwork(fixed_ip['ip_address']).version
         ip_addresses[ip_version].append(fixed_ip['ip_address'])
+
+    for allowed_ip in port.get('allowed_address_pairs', []):
+        if allowed_ip.get('ip_address'):
+            ip_version = \
+                netaddr.IPNetwork(allowed_ip['ip_address']).version
+            ip_addresses[ip_version].append(allowed_ip['ip_address'])
 
     return {'ip4': ip_addresses[4],
             'ip6': ip_addresses[6]}

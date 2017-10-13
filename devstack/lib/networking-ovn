@@ -55,10 +55,10 @@ NETWORKING_OVN_DIR=$DEST/networking-ovn
 OVN_BRANCH=${OVN_BRANCH:-master}
 
 # How to connect to ovsdb-server hosting the OVN SB database.
-OVN_SB_REMOTE=${OVN_SB_REMOTE:-tcp:$HOST_IP:6642}
+OVN_SB_REMOTE=${OVN_SB_REMOTE:-tcp:$SERVICE_HOST:6642}
 
 # How to connect to ovsdb-server hosting the OVN NB database
-OVN_NB_REMOTE=${OVN_NB_REMOTE:-tcp:$HOST_IP:6641}
+OVN_NB_REMOTE=${OVN_NB_REMOTE:-tcp:$SERVICE_HOST:6641}
 
 # A UUID to uniquely identify this system.  If one is not specified, a random
 # one will be generated.  A randomly generated UUID will be saved in a file
@@ -97,7 +97,7 @@ OVN_L3_SCHEDULER=${OVN_L3_SCHEDULER:-leastloaded}
 # Neutron directory
 NEUTRON_DIR=$DEST/neutron
 
-OVN_META_CONF=$NEUTRON_CONF_DIR/metadata_agent.ini
+OVN_META_CONF=$NEUTRON_CONF_DIR/networking_ovn_metadata_agent.ini
 
 # Set variables for building OVS from source
 OVS_REPO=$OVN_REPO
@@ -173,15 +173,20 @@ function configure_ovn {
     if is_service_enabled networking-ovn-metadata-agent; then
         sudo install -d -o $STACK_USER $NEUTRON_CONF_DIR
 
+        configure_neutron_rootwrap
+
         mkdir -p $NETWORKING_OVN_DIR/etc/neutron/plugins/ml2
         (cd $NETWORKING_OVN_DIR && exec ./tools/generate_config_file_samples.sh)
 
-        cp $NETWORKING_OVN_DIR/etc/metadata_agent.ini.sample $OVN_META_CONF
+        cp $NETWORKING_OVN_DIR/etc/networking_ovn_metadata_agent.ini.sample $OVN_META_CONF
 
         iniset $OVN_META_CONF DEFAULT debug $ENABLE_DEBUG_LOG_LEVEL
-        iniset $OVN_META_CONF DEFAULT nova_metadata_ip $HOST_IP
+        iniset $OVN_META_CONF DEFAULT nova_metadata_ip $SERVICE_HOST
         iniset $OVN_META_CONF DEFAULT metadata_workers $API_WORKERS
+        iniset $OVN_META_CONF DEFAULT state_path $NEUTRON_STATE_PATH
+        iniset $OVN_META_CONF agent root_helper_daemon "$NEUTRON_ROOTWRAP_DAEMON_CMD"
         iniset $OVN_META_CONF ovs ovsdb_connection unix:/usr/local/var/run/openvswitch/db.sock
+        iniset $OVN_META_CONF ovn ovn_sb_connection $OVN_SB_REMOTE
     fi
 }
 
@@ -221,7 +226,7 @@ function configure_ovn_plugin {
 
     # NOTE(rtheis): OVN currently lacks support for metadata so enabling
     # config drive is required to provide metadata to instances.
-    if is_service_enabled n-cpu ; then
+    if is_service_enabled n-api-meta ; then
         if is_service_enabled networking-ovn-metadata-agent ; then
             iniset $NOVA_CONF neutron service_metadata_proxy True
         else
@@ -468,7 +473,7 @@ function start_ovn {
     fi
 
     if is_service_enabled networking-ovn-metadata-agent; then
-        run_process networking-ovn-metadata-agent "$NETWORKING_OVN_BIN_DIR/$NETWORKING_OVN_METADATA_BINARY --config-file $NEUTRON_CONF --config-file $Q_PLUGIN_CONF_FILE --config-file $OVN_META_CONF"
+        run_process networking-ovn-metadata-agent "$NETWORKING_OVN_BIN_DIR/$NETWORKING_OVN_METADATA_BINARY --config-file $OVN_META_CONF"
     fi
 }
 

@@ -13,10 +13,12 @@
 #
 
 from neutron_lib.api.definitions import l3
+from neutron_lib.api.definitions import provider_net as pnet
 from neutron_lib.callbacks import events
 from neutron_lib.callbacks import registry
 from neutron_lib.callbacks import resources
 from neutron_lib import constants as n_const
+from neutron_lib import context as n_context
 from neutron_lib import exceptions as n_exc
 from neutron_lib.plugins import constants as plugin_constants
 from neutron_lib.plugins import directory
@@ -25,8 +27,12 @@ from oslo_log import log
 from oslo_utils import excutils
 
 from neutron.db import common_db_mixin
+from neutron.db import dns_db
 from neutron.db import extraroute_db
 from neutron.db import l3_gwmode_db
+from neutron.db.models import l3 as l3_models
+from neutron.extensions import external_net
+from neutron.quota import resource_registry
 
 from networking_ovn.common import extensions
 from networking_ovn.common import ovn_client
@@ -42,7 +48,8 @@ LOG = log.getLogger(__name__)
 class OVNL3RouterPlugin(service_base.ServicePluginBase,
                         common_db_mixin.CommonDbMixin,
                         extraroute_db.ExtraRoute_dbonly_mixin,
-                        l3_gwmode_db.L3_NAT_db_mixin):
+                        l3_gwmode_db.L3_NAT_db_mixin,
+                        dns_db.DNSDbMixin):
     """Implementation of the OVN L3 Router Service Plugin.
 
     This class implements a L3 service plugin that provides
@@ -52,6 +59,8 @@ class OVNL3RouterPlugin(service_base.ServicePluginBase,
     supported_extension_aliases = \
         extensions.ML2_SUPPORTED_API_EXTENSIONS_OVN_L3
 
+    @resource_registry.tracked_resources(router=l3_models.Router,
+                                         floatingip=l3_models.FloatingIP)
     def __init__(self):
         LOG.info("Starting OVNL3RouterPlugin")
         super(OVNL3RouterPlugin, self).__init__()
@@ -108,9 +117,13 @@ class OVNL3RouterPlugin(service_base.ServicePluginBase,
         if get_gw_port:
             return [p.port for p in router_db.attached_ports]
         else:
+            # When the existing deployment is migrated to OVN
+            # we may need to consider other port types - DVR_INTERFACE/HA_INTF.
             #仅含路由器接口上的port
             return [p.port for p in router_db.attached_ports
-                    if p.port_type == n_const.DEVICE_OWNER_ROUTER_INTF]
+                    if p.port_type in [n_const.DEVICE_OWNER_ROUTER_INTF,
+                                       n_const.DEVICE_OWNER_DVR_INTERFACE,
+                                       n_const.DEVICE_OWNER_ROUTER_HA_INTF]]
 
     def _get_v4_network_of_all_router_ports(self, context, router_id,
                                             ports=None):
@@ -419,21 +432,41 @@ class OVNL3RouterPlugin(service_base.ServicePluginBase,
                               '%(error)s', {'id': fip['id'], 'error': e})
         return router_ids
 
+    def _get_gateway_port_physnet_mapping(self):
+        # This function returns all gateway ports with corresponding
+        # external network's physnet
+        net_physnet_dict = {}
+        port_physnet_dict = {}
+        l3plugin = directory.get_plugin(plugin_constants.L3)
+        if not l3plugin:
+            return port_physnet_dict
+        context = n_context.get_admin_context()
+        for net in l3plugin._plugin.get_networks(
+            context, {external_net.EXTERNAL: [True]}):
+            if net.get(pnet.NETWORK_TYPE) in [n_const.TYPE_FLAT,
+                                              n_const.TYPE_VLAN]:
+                net_physnet_dict[net['id']] = net.get(pnet.PHYSICAL_NETWORK)
+        for port in l3plugin._plugin.get_ports(context, filters={
+            'device_owner': [n_const.DEVICE_OWNER_ROUTER_GW]}):
+            port_physnet_dict[port['id']] = net_physnet_dict.get(
+                port['network_id'])
+        return port_physnet_dict
+
     def schedule_unhosted_gateways(self):
-        #所有未绑定到chassis的gateway port选择合适的chassis
-        valid_chassis_list = self._sb_ovn.get_all_chassis()
+        port_physnet_dict = self._get_gateway_port_physnet_mapping()
+        chassis_physnets = self._sb_ovn.get_chassis_and_physnets()
         unhosted_gateways = self._ovn.get_unhosted_gateways(
-            valid_chassis_list)
-        if unhosted_gateways:
-            with self._ovn.transaction(check_error=True) as txn:
-                for g_name, r_options in unhosted_gateways.items():
-                    #为gateway选chassis(chassis就是每个ovn-controller所在的机器）
-                    chassis = self.scheduler.select(self._ovn, self._sb_ovn,
-                                                    g_name)
-                    #将这个port绑定到对应的机器
-                    r_options['redirect-chassis'] = chassis
-                    txn.add(self._ovn.update_lrouter_port(g_name,
-                                                          options=r_options))
+            port_physnet_dict, chassis_physnets)
+        with self._ovn.transaction(check_error=True) as txn:
+            for g_name in unhosted_gateways:
+                physnet = port_physnet_dict.get(g_name[len('lrp-'):])
+                candidates = [chassis
+                              for chassis, physnets in chassis_physnets.items()
+                              if physnet and physnet in physnets]
+                chassis = self.scheduler.select(
+                    self._ovn, self._sb_ovn, g_name, candidates=candidates)
+                txn.add(self._ovn.update_lrouter_port(
+                    g_name, gateway_chassis=chassis))
 
     @staticmethod
     @registry.receives(resources.SUBNET, [events.AFTER_UPDATE])

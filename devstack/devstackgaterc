@@ -18,10 +18,11 @@
 # http://git.openstack.org/cgit/openstack-infra/project-config/tree/jenkins/jobs/networking-ovn.yaml
 #
 
-OVS_BRANCH=$1
+OVN_OPTS=$@
+
 OVERRIDE_ENABLED_SERVICES=key,n-api,n-cpu,n-cond,n-sch,n-crt,n-cauth,n-obj,n-api-meta,placement-api,g-api,g-reg,c-sch,c-api,c-vol,rabbit,mysql,dstat,ovn-northd,ovn-controller,q-svc
 # FIXME(dalvarez): Remove this once OVS 2.8 is released. Metadata support depends on it.
-if [[ "${OVS_BRANCH}" != "latest-release" ]] ; then
+if [[ "${OVN_OPTS}" != *"latest-release"* ]] ; then
     OVERRIDE_ENABLED_SERVICES=${OVERRIDE_ENABLED_SERVICES},networking-ovn-metadata-agent
 fi
 export OVERRIDE_ENABLED_SERVICES
@@ -30,22 +31,19 @@ if [ -z "${RALLY_SCENARIO}" ] ; then
     # Only include tempest if this is not a rally job.
     export OVERRIDE_ENABLED_SERVICES=${OVERRIDE_ENABLED_SERVICES},tempest
     # FIXME(dalvarez): Remove this once OVS 2.8 is released. Metadata support depends on it.
-    if [[ "${OVS_BRANCH}" == "latest-release" ]] ; then
+    if [[ "${OVN_OPTS}" == *"latest-release"* ]] ; then
         export DEVSTACK_LOCAL_CONFIG+=$'\n'"TEMPEST_RUN_VALIDATION=False"
     fi
 fi
 export DEVSTACK_LOCAL_CONFIG+=$'\n'"Q_USE_PROVIDERNET_FOR_PUBLIC=True"
 export DEVSTACK_LOCAL_CONFIG+=$'\n'"PHYSICAL_NETWORK=public"
 
-if [[ "${OVS_BRANCH}" == "latest-release" ]] ; then
+if [[ "${OVN_OPTS}" == *"latest-release"* ]] ; then
     export DEVSTACK_LOCAL_CONFIG+=$'\n'"OVN_BRANCH=branch-2.7"
-elif [[ "${OVS_BRANCH}" == "master" ]] ; then
+elif [[ "${OVN_OPTS}" == *"master"* ]] ; then
     export DEVSTACK_LOCAL_CONFIG+=$'\n'"OVN_BRANCH=master"
-elif [[ -z "${OVS_BRANCH}" ]] ; then
-    : # Use the default specified in the devstack plugin
 else
-    echo "Unexpected value to ovs branch argument to devstackgaterc: \"${OVS_BRANCH}\""
-    exit 1
+    echo "No ovs branch specified, using the default from the devstack plugin"
 fi
 
 if [[ "$DEVSTACK_GATE_TOPOLOGY" == "multinode" ]] ; then
@@ -78,7 +76,6 @@ r="$r(?:.*\[.*\bslow\b.*\])"
 r="$r|(?:tempest\.scenario\.test_network_v6.*)"
 
 # exclude things that just aren't enabled with OVN
-r="$r|(?:tempest\.api\.network\.admin\.test_l3_agent_scheduler.*)"
 r="$r|(?:tempest\.api\.network\.admin\.test_quotas\.QuotasTest\.test_lbaas_quotas.*)"
 r="$r|(?:tempest\.api\.network\.test_load_balancer.*)"
 r="$r|(?:tempest\.scenario\.test_load_balancer.*)"
@@ -88,14 +85,8 @@ r="$r|(?:tempest\.api\.network\.test_fwaas_extensions.*)"
 r="$r|(?:tempest\.api\.network\.test_metering_extensions.*)"
 r="$r|(?:tempest\.thirdparty\.boto\.test_s3.*)"
 
-# exclude dhcp agent tests
-r="$r|(?:tempest\.api\.network\.admin\.test_dhcp_agent_scheduler.*)"
-
 # exclude this test case because this expects dhcp interface to be present
 r="$r|(?:tempest\.scenario\.test_network_basic_ops\.TestNetworkBasicOps\.test_port_security_macspoofing_port)"
-
-# exclude this test because there are no agents used by OVN
-r="$r|(?:tempest\.api\.network\.admin\.test_agent_management.*)"
 
 # exclude some unrelated stuff to make networking-ovn targeted runs go faster
 r="$r|(?:tempest\.api\.identity*)"
@@ -112,8 +103,14 @@ r="$r|(?:tempest\.api\.compute\.volumes*)"
 # End list of exclusions.
 r="$r)"
 
-# only run tempest.api/scenario/thirdparty tests (part of the default for 'full')
-r="$r(tempest\.(api|scenario|thirdparty)).*$"
+if [[ "${OVN_OPTS}" == *"neutron-api-tests"* ]]; then
+    r="$r(^neutron\.tests\.tempest\.api).*$"
+    export DEVSTACK_GATE_TEMPEST=1
+    export DEVSTACK_GATE_TEMPEST_ALL_PLUGINS=1
+else
+    # only run tempest.api/scenario/thirdparty tests (part of the default for 'full')
+    r="$r(tempest\.(api|scenario|thirdparty)).*$"
+fi
 
 if [ -z $DEVSTACK_GATE_GRENADE ]; then
     # Do not run the tempest test cases on grenade jobs. By not setting this,

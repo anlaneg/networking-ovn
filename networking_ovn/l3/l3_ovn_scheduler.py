@@ -14,6 +14,7 @@
 #
 
 import abc
+import copy
 import random
 
 from oslo_log import log
@@ -27,6 +28,8 @@ LOG = log.getLogger(__name__)
 
 OVN_SCHEDULER_CHANCE = 'chance'
 OVN_SCHEDULER_LEAST_LOADED = 'leastloaded'
+
+MAX_GW_CHASSIS = 5
 
 
 @six.add_metaclass(abc.ABCMeta)
@@ -48,15 +51,22 @@ class OVNGatewayScheduler(object):
         #为某个gateway_name选择chassis
         existing_chassis = nb_idl.get_gateway_chassis_binding(gateway_name)
         candidates = candidates or self._get_chassis_candidates(sb_idl)
-        if existing_chassis and (existing_chassis in candidates or
-                                 not candidates):
-            return existing_chassis #有效的chassis不变更
+        # if no candidates or all chassis in existing_chassis also present
+        # in candidates, then return existing_chassis
+        # TODO(anilvenkata): If more candidates avaialable, then schedule
+        # on them also?
+        if existing_chassis and (not candidates or
+           not (set(existing_chassis) - set(candidates))):
+            return existing_chassis#有效的chassis不变更
         if not candidates:
-            return ovn_const.OVN_GATEWAY_INVALID_CHASSIS
+            return [ovn_const.OVN_GATEWAY_INVALID_CHASSIS]
         # The actual binding of the gateway to a chassis via the options
-        # column in the OVN_Northbound is done by the caller
+        # column or gateway_chassis column in the OVN_Northbound is done
+        # by the caller
         # 从待选项里选择一个chassis
-        chassis = self._select_gateway_chassis(nb_idl, candidates)
+        chassis = self._select_gateway_chassis(
+            nb_idl, candidates)[:MAX_GW_CHASSIS]
+
         LOG.debug("Gateway %s scheduled on chassis %s",
                   gateway_name, chassis)
         return chassis
@@ -82,7 +92,9 @@ class OVNGatewayChanceScheduler(OVNGatewayScheduler):
         return self._schedule_gateway(nb_idl, sb_idl, gateway_name, candidates)
 
     def _select_gateway_chassis(self, nb_idl, candidates):
-        return random.choice(candidates)
+        candidates = copy.deepcopy(candidates)
+        random.shuffle(candidates)
+        return candidates
 
 
 class OVNGatewayLeastLoadedScheduler(OVNGatewayScheduler):
@@ -94,7 +106,8 @@ class OVNGatewayLeastLoadedScheduler(OVNGatewayScheduler):
     def _select_gateway_chassis(self, nb_idl, candidates):
         chassis_bindings = nb_idl.get_all_chassis_gateway_bindings(candidates)
         # Sort on the length of the values in the returned dictionary
-        return sorted(chassis_bindings.items(), key=lambda x: len(x[1]))[0][0]
+        return [k for k, v in
+                sorted(chassis_bindings.items(), key=lambda x: len(x[1]))]
 
 
 OVN_SCHEDULER_STR_TO_CLASS = {

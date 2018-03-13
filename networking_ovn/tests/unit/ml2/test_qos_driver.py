@@ -11,12 +11,14 @@
 #    under the License.
 
 import mock
+from neutron_lib import constants
 from oslo_utils import uuidutils
 
 from neutron.objects.qos import policy as qos_policy
 from neutron.objects.qos import rule as qos_rule
 from neutron.tests import base
 
+from networking_ovn.common import utils
 from networking_ovn.ml2 import qos_driver
 
 context = 'context'
@@ -26,25 +28,27 @@ class TestOVNQosNotificationDriver(base.BaseTestCase):
 
     def setUp(self):
         super(TestOVNQosNotificationDriver, self).setUp()
-        self.driver = qos_driver.OVNQosNotificationDriver()
         self.mech_driver = mock.Mock()
-        self.qos_driver = mock.Mock()
-        self.driver._driver_property = self.mech_driver
-        self.mech_driver.qos_driver = self.qos_driver
+        self.mech_driver._ovn_client = mock.Mock()
+        self.mech_driver._ovn_client._qos_driver = mock.Mock()
+        self.driver = qos_driver.OVNQosNotificationDriver.create(
+            self.mech_driver)
         self.policy = "policy"
 
     def test_create_policy(self):
         self.driver.create_policy(context, self.policy)
-        self.qos_driver.create_policy.assert_not_called()
+        self.driver._driver._ovn_client._qos_driver.create_policy.\
+            assert_not_called()
 
     def test_update_policy(self):
         self.driver.update_policy(context, self.policy)
-        self.qos_driver.update_policy.assert_called_once_with(context,
-                                                              self.policy)
+        self.driver._driver._ovn_client._qos_driver.update_policy.\
+            assert_called_once_with(context, self.policy)
 
     def test_delete_policy(self):
         self.driver.delete_policy(context, self.policy)
-        self.qos_driver.delete_policy.assert_not_called()
+        self.driver._driver._ovn_client._qos_driver.delete_policy.\
+            assert_not_called()
 
 
 class TestOVNQosDriver(base.BaseTestCase):
@@ -52,8 +56,8 @@ class TestOVNQosDriver(base.BaseTestCase):
     def setUp(self):
         super(TestOVNQosDriver, self).setUp()
         self.plugin = mock.Mock()
-        self.mech_driver = mock.Mock()
-        self.driver = qos_driver.OVNQosDriver(self.mech_driver)
+        self.ovn_client = mock.Mock()
+        self.driver = qos_driver.OVNQosDriver(self.ovn_client)
         self.driver._plugin_property = self.plugin
         self.port_id = uuidutils.generate_uuid()
         self.policy_id = uuidutils.generate_uuid()
@@ -89,19 +93,20 @@ class TestOVNQosDriver(base.BaseTestCase):
                 'qos_policy_id': self.network_policy_id}
 
     def test__is_network_device_port(self):
-        self.assertFalse(self.driver._is_network_device_port(self.port))
+        self.assertFalse(utils.is_network_device_port(self.port))
         port = self._create_fake_port()
-        port['device_owner'] = 'network:dhcp'
-        self.assertTrue(self.driver._is_network_device_port(port))
+        port['device_owner'] = constants.DEVICE_OWNER_DHCP
+        self.assertTrue(utils.is_network_device_port(port))
         port['device_owner'] = 'neutron:LOADBALANCERV2'
-        self.assertTrue(self.driver._is_network_device_port(port))
+        self.assertTrue(utils.is_network_device_port(port))
 
     def _generate_port_options(self, policy_id, return_val, expected_result):
         with mock.patch.object(qos_rule, 'get_rules',
                                return_value=return_val) as get_rules:
             options = self.driver._generate_port_options(context, policy_id)
             if policy_id:
-                get_rules.assert_called_once_with(context, policy_id)
+                get_rules.assert_called_once_with(qos_policy.QosPolicy,
+                                                  context, policy_id)
             else:
                 get_rules.assert_not_called()
             self.assertEqual(expected_result, options)
@@ -143,7 +148,7 @@ class TestOVNQosDriver(base.BaseTestCase):
 
     def test_get_qos_options_network_port(self):
         port = self._create_fake_port()
-        port['device_owner'] = 'network:dhcp'
+        port['device_owner'] = constants.DEVICE_OWNER_DHCP
         self._get_qos_options(port, False, False)
 
     @mock.patch('neutron_lib.context.get_admin_context', return_value=context)
@@ -159,7 +164,7 @@ class TestOVNQosDriver(base.BaseTestCase):
     def _update_network_ports(self, port, called):
         with mock.patch.object(self.plugin, 'get_ports',
                                return_value=[port]) as get_ports:
-            with mock.patch.object(self.mech_driver,
+            with mock.patch.object(self.ovn_client,
                                    'update_port') as update_port:
                 self.driver._update_network_ports(
                     context, self.network_id, {})
@@ -175,7 +180,7 @@ class TestOVNQosDriver(base.BaseTestCase):
 
     def test__update_network_ports_network_device(self):
         port = self._create_fake_port()
-        port['device_owner'] = 'network:dhcp'
+        port['device_owner'] = constants.DEVICE_OWNER_DHCP
         self._update_network_ports(port, False)
 
     def test__update_network_ports(self):
@@ -183,12 +188,12 @@ class TestOVNQosDriver(base.BaseTestCase):
         port['qos_policy_id'] = None
         self._update_network_ports(port, True)
 
-    def _update_network(self, network, original_network, called):
+    def _update_network(self, network, called):
         with mock.patch.object(self.driver, '_generate_port_options',
                                return_value={}) as generate_port_options:
             with mock.patch.object(self.driver, '_update_network_ports'
                                    ) as update_network_ports:
-                self.driver.update_network(network, original_network)
+                self.driver.update_network(network)
                 if called:
                     generate_port_options.assert_called_once_with(
                         context, self.network_policy_id)
@@ -202,22 +207,12 @@ class TestOVNQosDriver(base.BaseTestCase):
     def test_update_network_no_qos(self, *mocks):
         network = self._create_fake_network()
         network.pop('qos_policy_id')
-        original_network = self._create_fake_network()
-        original_network.pop('qos_policy_id')
-        self._update_network(network, original_network, False)
-
-    @mock.patch('neutron_lib.context.get_admin_context', return_value=context)
-    def test_update_network_no_change(self, *mocks):
-        network = self._create_fake_network()
-        original_network = self._create_fake_network()
-        self._update_network(network, original_network, False)
+        self._update_network(network, False)
 
     @mock.patch('neutron_lib.context.get_admin_context', return_value=context)
     def test_update_network_policy_change(self, *mocks):
         network = self._create_fake_network()
-        original_network = self._create_fake_network()
-        original_network['qos_policy_id'] = uuidutils.generate_uuid()
-        self._update_network(network, original_network, True)
+        self._update_network(network, True)
 
     def test_update_policy(self):
         with mock.patch.object(self.driver, '_generate_port_options',
@@ -232,7 +227,7 @@ class TestOVNQosDriver(base.BaseTestCase):
                               ) as get_bound_ports, \
             mock.patch.object(self.plugin, 'get_port',
                               return_value=self.port) as get_port, \
-            mock.patch.object(self.mech_driver, 'update_port',
+            mock.patch.object(self.ovn_client, 'update_port',
                               ) as update_port:
 
             self.driver.update_policy(context, self.policy)
@@ -244,4 +239,4 @@ class TestOVNQosDriver(base.BaseTestCase):
                 context, self.network_id, {})
             get_bound_ports.assert_called_once()
             get_port.assert_called_once_with(context, self.port_id)
-            update_port.assert_called_once_with(self.port, self.port, {})
+            update_port.assert_called_once_with(self.port, qos_options={})

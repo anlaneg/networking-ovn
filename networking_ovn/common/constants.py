@@ -14,17 +14,29 @@ from neutron_lib.api.definitions import portbindings
 from neutron_lib import constants as const
 import six
 
+# TODO(lucasagomes): Remove OVN_SG_NAME_EXT_ID_KEY in the Rocky release
+OVN_SG_NAME_EXT_ID_KEY = 'neutron:security_group_name'
+OVN_SG_EXT_ID_KEY = 'neutron:security_group_id'
+OVN_SG_RULE_EXT_ID_KEY = 'neutron:security_group_rule_id'
 OVN_ML2_MECH_DRIVER_NAME = 'ovn'
 OVN_NETWORK_NAME_EXT_ID_KEY = 'neutron:network_name'
 OVN_PORT_NAME_EXT_ID_KEY = 'neutron:port_name'
 OVN_ROUTER_NAME_EXT_ID_KEY = 'neutron:router_name'
-OVN_SG_NAME_EXT_ID_KEY = 'neutron:security_group_name'
+OVN_ROUTER_IS_EXT_GW = 'neutron:is_ext_gw'
+OVN_GW_PORT_EXT_ID_KEY = 'neutron:gw_port_id'
+OVN_SUBNET_EXT_ID_KEY = 'neutron:subnet_id'
 OVN_PHYSNET_EXT_ID_KEY = 'neutron:provnet-physical-network'
 OVN_NETTYPE_EXT_ID_KEY = 'neutron:provnet-network-type'
 OVN_SEGID_EXT_ID_KEY = 'neutron:provnet-segmentation-id'
 OVN_PROJID_EXT_ID_KEY = 'neutron:project_id'
 OVN_DEVID_EXT_ID_KEY = 'neutron:device_id'
 OVN_CIDRS_EXT_ID_KEY = 'neutron:cidrs'
+OVN_FIP_EXT_ID_KEY = 'neutron:fip_id'
+OVN_FIP_PORT_EXT_ID_KEY = 'neutron:fip_port_id'
+OVN_REV_NUM_EXT_ID_KEY = 'neutron:revision_number'
+OVN_QOS_POLICY_EXT_ID_KEY = 'neutron:qos_policy_id'
+OVN_SG_IDS_EXT_ID_KEY = 'neutron:security_group_ids'
+OVN_DEVICE_OWNER_EXT_ID_KEY = 'neutron:device_owner'
 OVN_PORT_BINDING_PROFILE = portbindings.PROFILE
 #ovn port容许提供这些配置项
 OVN_PORT_BINDING_PROFILE_PARAMS = [{'parent_name': six.string_types,#父port名称
@@ -69,3 +81,46 @@ DHCPV6_STATELESS_OPT = 'dhcpv6_stateless'
 
 CHASSIS_DATAPATH_NETDEV = 'netdev'
 CHASSIS_IFACE_DPDKVHOSTUSER = 'dpdkvhostuser'
+
+OVN_IPV6_ADDRESS_MODES = {
+    const.IPV6_SLAAC: const.IPV6_SLAAC,
+    const.DHCPV6_STATEFUL: const.DHCPV6_STATEFUL.replace('-', '_'),
+    const.DHCPV6_STATELESS: const.DHCPV6_STATELESS.replace('-', '_')
+}
+
+DB_MAX_RETRIES = 60
+DB_INITIAL_RETRY_INTERVAL = 0.5
+DB_MAX_RETRY_INTERVAL = 1
+
+TXN_COMMITTED = 'committed'
+INITIAL_REV_NUM = -1
+
+# Resource types
+TYPE_NETWORKS = 'networks'
+TYPE_PORTS = 'ports'
+TYPE_SECURITY_GROUP_RULES = 'security_group_rules'
+TYPE_ROUTERS = 'routers'
+TYPE_ROUTER_PORTS = 'router_ports'
+TYPE_SECURITY_GROUPS = 'security_groups'
+TYPE_FLOATINGIPS = 'floatingips'
+TYPE_SUBNETS = 'subnets'
+
+_TYPES_PRIORITY_ORDER = (
+    TYPE_NETWORKS,
+    TYPE_SECURITY_GROUPS,
+    TYPE_SUBNETS,
+    TYPE_ROUTERS,
+    TYPE_PORTS,
+    TYPE_ROUTER_PORTS,
+    TYPE_FLOATINGIPS,
+    TYPE_SECURITY_GROUP_RULES)
+
+# The order in which the resources should be created or updated by the
+# maintenance task: Root ones first and leafs at the end.
+MAINTENANCE_CREATE_UPDATE_TYPE_ORDER = {
+    t: n for n, t in enumerate(_TYPES_PRIORITY_ORDER, 1)}
+
+# The order in which the resources should be deleted by the maintenance
+# task: Leaf ones first and roots at the end.
+MAINTENANCE_DELETE_TYPE_ORDER = {
+    t: n for n, t in enumerate(reversed(_TYPES_PRIORITY_ORDER), 1)}

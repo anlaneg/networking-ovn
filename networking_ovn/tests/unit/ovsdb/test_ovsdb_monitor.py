@@ -192,14 +192,12 @@ class TestOvnNbIdlNotifyHandler(test_mech_driver.OVNMechanismDriverTestCase):
         self.assertFalse(self.driver.set_port_status_down.called)
 
     def test_notify_no_ovsdb_lock(self):
-        self.idl.has_lock = False
         self.idl.is_lock_contended = True
         self.idl.notify_handler.notify = mock.Mock()
         self.idl.notify("create", mock.ANY)
         self.assertFalse(self.idl.notify_handler.notify.called)
 
     def test_notify_ovsdb_lock_not_yet_contended(self):
-        self.idl.has_lock = False
         self.idl.is_lock_contended = False
         self.idl.notify_handler.notify = mock.Mock()
         self.idl.notify("create", mock.ANY)
@@ -221,8 +219,7 @@ class TestOvnSbIdlNotifyHandler(test_mech_driver.OVNMechanismDriverTestCase):
         self.chassis_table = self.sb_idl.tables.get('Chassis')
         self.driver.update_segment_host_mapping = mock.Mock()
         self.l3_plugin = directory.get_plugin(constants.L3)
-        if ovn_config.is_ovn_l3():
-            self.l3_plugin.schedule_unhosted_gateways = mock.Mock()
+        self.l3_plugin.schedule_unhosted_gateways = mock.Mock()
 
         self.row_json = {
             "name": "fake-name",
@@ -250,19 +247,17 @@ class TestOvnSbIdlNotifyHandler(test_mech_driver.OVNMechanismDriverTestCase):
         self._test_chassis_helper('create', self.row_json)
         self.driver.update_segment_host_mapping.assert_called_once_with(
             'fake-hostname', ['fake-phynet1'])
-        if ovn_config.is_ovn_l3():
-            self.assertEqual(
-                1,
-                self.l3_plugin.schedule_unhosted_gateways.call_count)
+        self.assertEqual(
+            1,
+            self.l3_plugin.schedule_unhosted_gateways.call_count)
 
     def test_chassis_delete_event(self):
         self._test_chassis_helper('delete', self.row_json)
         self.driver.update_segment_host_mapping.assert_called_once_with(
             'fake-hostname', [])
-        if ovn_config.is_ovn_l3():
-            self.assertEqual(
-                1,
-                self.l3_plugin.schedule_unhosted_gateways.call_count)
+        self.assertEqual(
+            1,
+            self.l3_plugin.schedule_unhosted_gateways.call_count)
 
     def test_chassis_update_event(self):
         old_row_json = copy.deepcopy(self.row_json)
@@ -271,10 +266,9 @@ class TestOvnSbIdlNotifyHandler(test_mech_driver.OVNMechanismDriverTestCase):
         self._test_chassis_helper('update', self.row_json, old_row_json)
         self.driver.update_segment_host_mapping.assert_called_once_with(
             'fake-hostname', ['fake-phynet1'])
-        if ovn_config.is_ovn_l3():
-            self.assertEqual(
-                1,
-                self.l3_plugin.schedule_unhosted_gateways.call_count)
+        self.assertEqual(
+            1,
+            self.l3_plugin.schedule_unhosted_gateways.call_count)
 
 
 class TestOvnDbNotifyHandler(base.TestCase):

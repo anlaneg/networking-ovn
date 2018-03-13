@@ -187,7 +187,12 @@ class TestNBImplIdlOvn(TestDBImplIdlOvn):
                  {'external_ip': '20.0.2.1', 'logical_ip': '10.0.0.0/24',
                   'type': 'snat'},
                  {'external_ip': '20.0.2.4', 'logical_ip': '10.0.0.4',
-                  'type': 'dnat_and_snat'}],
+                  'type': 'dnat_and_snat', 'external_mac': [],
+                  'logical_port': []},
+                 {'external_ip': '20.0.2.5', 'logical_ip': '10.0.0.5',
+                  'type': 'dnat_and_snat',
+                  'external_mac': ['00:01:02:03:04:05'],
+                  'logical_port': ['lsp-id-001']}],
         'acls': [
             {'unit_test_id': 1,
              'action': 'allow-related', 'direction': 'from-lport',
@@ -258,19 +263,19 @@ class TestNBImplIdlOvn(TestDBImplIdlOvn):
         'address_sets': [
             {'name': '$as_ip4_id_1',
              'addresses': ['10.0.1.1', '10.0.1.2'],
-             'external_ids': {ovn_const.OVN_SG_NAME_EXT_ID_KEY: 'id_1'}},
+             'external_ids': {ovn_const.OVN_SG_EXT_ID_KEY: 'id_1'}},
             {'name': '$as_ip4_id_2',
              'addresses': ['10.0.2.1'],
-             'external_ids': {ovn_const.OVN_SG_NAME_EXT_ID_KEY: 'id_2'}},
+             'external_ids': {ovn_const.OVN_SG_EXT_ID_KEY: 'id_2'}},
             {'name': '$as_ip4_id_3',
              'addresses': ['10.0.3.1', '10.0.3.2'],
-             'external_ids': {ovn_const.OVN_SG_NAME_EXT_ID_KEY: 'id_3'}},
+             'external_ids': {ovn_const.OVN_SG_EXT_ID_KEY: 'id_3'}},
             {'name': '$as_ip4_id_4',
              'addresses': ['20.0.1.1', '20.0.1.2'],
              'external_ids': {}},
             {'name': '$as_ip4_id_5',
              'addresses': ['20.0.2.1', '20.0.2.2'],
-             'external_ids': {ovn_const.OVN_SG_NAME_EXT_ID_KEY: 'id_5'}},
+             'external_ids': {ovn_const.OVN_SG_EXT_ID_KEY: 'id_5'}},
             ]}
 
     fake_associations = {
@@ -300,7 +305,7 @@ class TestNBImplIdlOvn(TestDBImplIdlOvn):
             },
         'lrtonat': {
             utils.ovn_name('lr-id-a'): ['10.0.3.1'],
-            utils.ovn_name('lr-id-b'): ['20.0.2.1', '20.0.2.4'],
+            utils.ovn_name('lr-id-b'): ['20.0.2.1', '20.0.2.4', '20.0.2.5'],
             },
         'lstoacl': {
             utils.ovn_name('ls-id-1'): [1, 2, 3, 4],
@@ -455,7 +460,12 @@ class TestNBImplIdlOvn(TestDBImplIdlOvn):
                                 'type': 'snat'}],
                      'dnat_and_snats': [{'external_ip': '20.0.2.4',
                                          'logical_ip': '10.0.0.4',
-                                         'type': 'dnat_and_snat'}]},
+                                         'type': 'dnat_and_snat'},
+                                        {'external_ip': '20.0.2.5',
+                                         'logical_ip': '10.0.0.5',
+                                         'type': 'dnat_and_snat',
+                                         'external_mac': '00:01:02:03:04:05',
+                                         'logical_port': 'lsp-id-001'}]},
                     {'name': 'lr-id-c', 'ports': {}, 'static_routes': [],
                      'snats': [], 'dnat_and_snats': []},
                     {'name': 'lr-id-d', 'ports': {}, 'static_routes': [],
@@ -570,7 +580,7 @@ class TestNBImplIdlOvn(TestDBImplIdlOvn):
         self._load_nb_db()
         # Test only host-1 in the valid list
         unhosted_gateways = self.nb_ovn_idl.get_unhosted_gateways(
-            {}, {'host-1': 'physnet1'})
+            {}, {'host-1': 'physnet1'}, [])
         expected = {
             utils.ovn_lrouter_port_name('orp-id-b2'): {
                 ovn_const.OVN_GATEWAY_CHASSIS_KEY: 'host-2'},
@@ -580,7 +590,7 @@ class TestNBImplIdlOvn(TestDBImplIdlOvn):
         self.assertItemsEqual(unhosted_gateways, expected)
         # Test both host-1, host-2 in valid list
         unhosted_gateways = self.nb_ovn_idl.get_unhosted_gateways(
-            {}, {'host-1': 'physnet1', 'host-2': 'physnet2'})
+            {}, {'host-1': 'physnet1', 'host-2': 'physnet2'}, [])
         expected = {utils.ovn_lrouter_port_name('orp-id-a3'): {
             ovn_const.OVN_GATEWAY_CHASSIS_KEY:
                 ovn_const.OVN_GATEWAY_INVALID_CHASSIS}}
@@ -592,7 +602,7 @@ class TestNBImplIdlOvn(TestDBImplIdlOvn):
             setattr(router_row, 'options', {
                 ovn_const.OVN_GATEWAY_CHASSIS_KEY: 'host-2'})
         unhosted_gateways = self.nb_ovn_idl.get_unhosted_gateways(
-            {}, {'host-1': 'physnet1', 'host-2': 'physnet2'})
+            {}, {'host-1': 'physnet1', 'host-2': 'physnet2'}, [])
         self.assertItemsEqual(unhosted_gateways, {})
 
     def test_get_subnet_dhcp_options(self):
@@ -601,28 +611,29 @@ class TestNBImplIdlOvn(TestDBImplIdlOvn):
             'subnet-id-10-0-2-0')
         expected_row = self._find_ovsdb_fake_row(self.dhcp_table,
                                                  'cidr', '10.0.2.0/24')
-        self.assertEqual({'cidr': expected_row.cidr,
-                          'external_ids': expected_row.external_ids,
-                          'options': expected_row.options,
-                          'uuid': expected_row.uuid},
-                         subnet_options)
+        self.assertEqual({
+            'subnet': {'cidr': expected_row.cidr,
+                       'external_ids': expected_row.external_ids,
+                       'options': expected_row.options,
+                       'uuid': expected_row.uuid},
+            'ports': []}, subnet_options)
         subnet_options = self.nb_ovn_idl.get_subnet_dhcp_options(
-            'subnet-id-11-0-2-0')
+            'subnet-id-11-0-2-0')['subnet']
         self.assertIsNone(subnet_options)
         subnet_options = self.nb_ovn_idl.get_subnet_dhcp_options(
-            'port-id-30-0-1-0')
+            'port-id-30-0-1-0')['subnet']
         self.assertIsNone(subnet_options)
 
-    def test_get_subnet_and_ports_dhcp_options(self):
+    def test_get_subnet_dhcp_options_with_ports(self):
         # Test empty
-        subnet_options = self.nb_ovn_idl.get_subnet_and_ports_dhcp_options(
-            'subnet-id-10-0-1-0')
-        self.assertItemsEqual([], subnet_options)
+        subnet_options = self.nb_ovn_idl.get_subnet_dhcp_options(
+            'subnet-id-10-0-1-0', with_ports=True)
+        self.assertItemsEqual({'subnet': None, 'ports': []}, subnet_options)
         # Test loaded values
         self._load_nb_db()
         # Test getting both subnet and port dhcp options
-        subnet_options = self.nb_ovn_idl.get_subnet_and_ports_dhcp_options(
-            'subnet-id-10-0-1-0')
+        subnet_options = self.nb_ovn_idl.get_subnet_dhcp_options(
+            'subnet-id-10-0-1-0', with_ports=True)
         dhcp_rows = [
             self._find_ovsdb_fake_row(self.dhcp_table, 'cidr', '10.0.1.0/24'),
             self._find_ovsdb_fake_row(self.dhcp_table, 'cidr', '10.0.1.0/26')]
@@ -630,21 +641,23 @@ class TestNBImplIdlOvn(TestDBImplIdlOvn):
                           'external_ids': dhcp_row.external_ids,
                           'options': dhcp_row.options,
                           'uuid': dhcp_row.uuid} for dhcp_row in dhcp_rows]
-        self.assertItemsEqual(expected_rows, subnet_options)
+        self.assertItemsEqual(expected_rows, [
+            subnet_options['subnet']] + subnet_options['ports'])
         # Test getting only subnet dhcp options
-        subnet_options = self.nb_ovn_idl.get_subnet_and_ports_dhcp_options(
-            'subnet-id-10-0-2-0')
+        subnet_options = self.nb_ovn_idl.get_subnet_dhcp_options(
+            'subnet-id-10-0-2-0', with_ports=True)
         dhcp_rows = [
             self._find_ovsdb_fake_row(self.dhcp_table, 'cidr', '10.0.2.0/24')]
         expected_rows = [{'cidr': dhcp_row.cidr,
                           'external_ids': dhcp_row.external_ids,
                           'options': dhcp_row.options,
                           'uuid': dhcp_row.uuid} for dhcp_row in dhcp_rows]
-        self.assertItemsEqual(expected_rows, subnet_options)
+        self.assertItemsEqual(expected_rows, [
+            subnet_options['subnet']] + subnet_options['ports'])
         # Test getting no dhcp options
-        subnet_options = self.nb_ovn_idl.get_subnet_and_ports_dhcp_options(
-            'subnet-id-11-0-2-0')
-        self.assertItemsEqual([], subnet_options)
+        subnet_options = self.nb_ovn_idl.get_subnet_dhcp_options(
+            'subnet-id-11-0-2-0', with_ports=True)
+        self.assertItemsEqual({'subnet': None, 'ports': []}, subnet_options)
 
     def test_get_subnets_dhcp_options(self):
         self._load_nb_db()
@@ -677,10 +690,6 @@ class TestNBImplIdlOvn(TestDBImplIdlOvn):
         dhcp_options = self.nb_ovn_idl.get_all_dhcp_options()
         self.assertEqual(len(dhcp_options['subnets']), 3)
         self.assertEqual(len(dhcp_options['ports_v4']), 2)
-
-    def test_compose_dhcp_options_commands(self):
-        # TODO(azbiswas): Implement in separate patch
-        pass
 
     def test_get_address_sets(self):
         self._load_nb_db()
@@ -736,18 +745,3 @@ class TestSBImplIdlOvn(TestDBImplIdlOvn):
         mock_get_probe_interval.return_value = 5000
         inst = impl_idl_ovn.OvsdbSbOvnIdl(mock.Mock())
         inst.idl._session.reconnect.set_probe_interval.assert_called_with(5000)
-
-    def test_get_chassis_hostname_and_physnets(self):
-        self._load_sb_db()
-        mapping = self.sb_ovn_idl.get_chassis_hostname_and_physnets()
-        self.assertEqual(len(mapping), 3)
-        self.assertItemsEqual(mapping.keys(), ['host-1.localdomain.com',
-                                               'host-2.localdomain.com',
-                                               'host-3.localdomain.com'])
-
-    def test_get_all_chassis(self):
-        self._load_sb_db()
-        chassis_list = self.sb_ovn_idl.get_all_chassis()
-        self.assertItemsEqual(chassis_list, ['host-1', 'host-2', 'host-3'])
-        # TODO(azbiswas): Unit test get_all_chassis with specific chassis
-        # type

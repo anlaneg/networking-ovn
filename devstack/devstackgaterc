@@ -20,31 +20,26 @@
 
 OVN_OPTS=$@
 
-OVERRIDE_ENABLED_SERVICES=key,n-api,n-cpu,n-cond,n-sch,n-crt,n-cauth,n-obj,n-api-meta,placement-api,g-api,g-reg,c-sch,c-api,c-vol,rabbit,mysql,dstat,ovn-northd,ovn-controller,q-svc
-# FIXME(dalvarez): Remove this once OVS 2.8 is released. Metadata support depends on it.
-if [[ "${OVN_OPTS}" != *"latest-release"* ]] ; then
-    OVERRIDE_ENABLED_SERVICES=${OVERRIDE_ENABLED_SERVICES},networking-ovn-metadata-agent
-fi
+OVERRIDE_ENABLED_SERVICES=key,n-api,n-cpu,n-cond,n-sch,n-crt,n-cauth,n-obj,n-api-meta,placement-api,g-api,g-reg,c-sch,c-api,c-vol,rabbit,mysql,dstat,ovn-northd,ovn-controller,q-svc,networking-ovn-metadata-agent,br-ex-tcpdump,br-int-flows,q-trunk
 export OVERRIDE_ENABLED_SERVICES
 
 if [ -z "${RALLY_SCENARIO}" ] ; then
     # Only include tempest if this is not a rally job.
     export OVERRIDE_ENABLED_SERVICES=${OVERRIDE_ENABLED_SERVICES},tempest
-    # FIXME(dalvarez): Remove this once OVS 2.8 is released. Metadata support depends on it.
-    if [[ "${OVN_OPTS}" == *"latest-release"* ]] ; then
-        export DEVSTACK_LOCAL_CONFIG+=$'\n'"TEMPEST_RUN_VALIDATION=False"
-    fi
 fi
 export DEVSTACK_LOCAL_CONFIG+=$'\n'"Q_USE_PROVIDERNET_FOR_PUBLIC=True"
 export DEVSTACK_LOCAL_CONFIG+=$'\n'"PHYSICAL_NETWORK=public"
 
 if [[ "${OVN_OPTS}" == *"latest-release"* ]] ; then
-    export DEVSTACK_LOCAL_CONFIG+=$'\n'"OVN_BRANCH=branch-2.7"
+    export DEVSTACK_LOCAL_CONFIG+=$'\n'"OVN_BRANCH=branch-2.9"
 elif [[ "${OVN_OPTS}" == *"master"* ]] ; then
     export DEVSTACK_LOCAL_CONFIG+=$'\n'"OVN_BRANCH=master"
 else
     echo "No ovs branch specified, using the default from the devstack plugin"
 fi
+
+# Enable controller to host gateway routers
+export DEVSTACK_LOCAL_CONFIG+=$'\n'"ENABLE_CHASSIS_AS_GW=True"
 
 if [[ "$DEVSTACK_GATE_TOPOLOGY" == "multinode" ]] ; then
     # NOTE(rtheis): Multinode does not require creating an OVN L3 public network.
@@ -72,9 +67,6 @@ r="^(?!.*"
 # exclude the slow tag (part of the default for 'full')
 r="$r(?:.*\[.*\bslow\b.*\])"
 
-# TODO(chandrav): Opened bug #1629073 to track this
-r="$r|(?:tempest\.scenario\.test_network_v6.*)"
-
 # exclude things that just aren't enabled with OVN
 r="$r|(?:tempest\.api\.network\.admin\.test_quotas\.QuotasTest\.test_lbaas_quotas.*)"
 r="$r|(?:tempest\.api\.network\.test_load_balancer.*)"
@@ -85,7 +77,7 @@ r="$r|(?:tempest\.api\.network\.test_fwaas_extensions.*)"
 r="$r|(?:tempest\.api\.network\.test_metering_extensions.*)"
 r="$r|(?:tempest\.thirdparty\.boto\.test_s3.*)"
 
-# exclude this test case because this expects dhcp interface to be present
+# TODO(dalvarez): remove this exclusion when https://bugs.launchpad.net/tempest/+bug/1728886 is fixed
 r="$r|(?:tempest\.scenario\.test_network_basic_ops\.TestNetworkBasicOps\.test_port_security_macspoofing_port)"
 
 # exclude some unrelated stuff to make networking-ovn targeted runs go faster
@@ -99,12 +91,20 @@ r="$r|(?:tempest\.api\.compute\.flavors*)"
 r="$r|(?:tempest\.api\.compute\.test_quotas*)"
 r="$r|(?:tempest\.api\.compute\.test_versions*)"
 r="$r|(?:tempest\.api\.compute\.volumes*)"
+r="$r|(?:tempest\.api\.compute\.admin\.test_flavor*)"
+r="$r|(?:tempest\.api\.compute\.admin\.test_volume*)"
+r="$r|(?:tempest\.api\.compute\.admin\.test_hypervisor*)"
+r="$r|(?:tempest\.api\.compute\.admin\.test_aggregate*)"
+r="$r|(?:tempest\.api\.compute\.admin\.test_quota*)"
+
+r="$r|(?:tempest\.scenario\.test_volume*)"
 
 # End list of exclusions.
 r="$r)"
 
-if [[ "${OVN_OPTS}" == *"neutron-api-tests"* ]]; then
-    r="$r(^neutron\.tests\.tempest\.api).*$"
+if [[ "${OVN_OPTS}" == *"neutron-api-scenario-tests"* ]] ; then
+    r="$r((^neutron_tempest_plugin\.api)|(^neutron_tempest_plugin\.scenario)).*$"
+    export DEVSTACK_LOCAL_CONFIG+=$'\n'"enable_plugin neutron-tempest-plugin git://git.openstack.org/openstack/neutron-tempest-plugin"
     export DEVSTACK_GATE_TEMPEST=1
     export DEVSTACK_GATE_TEMPEST_ALL_PLUGINS=1
 else

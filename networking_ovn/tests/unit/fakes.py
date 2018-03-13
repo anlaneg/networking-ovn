@@ -12,17 +12,20 @@
 #    under the License.
 #
 
+import collections
 import copy
 
 import mock
+from neutron_lib.api.definitions import l3
 from oslo_utils import uuidutils
+
+from networking_ovn.common import constants as ovn_const
+from networking_ovn.common import utils
 
 
 class FakeOvsdbNbOvnIdl(object):
 
     def __init__(self, **kwargs):
-        def _fake(*args, **kwargs):
-            return mock.MagicMock()
         self.lswitch_table = FakeOvsdbTable.create_one_ovsdb_table()
         self.lsp_table = FakeOvsdbTable.create_one_ovsdb_table()
         self.lrouter_table = FakeOvsdbTable.create_one_ovsdb_table()
@@ -44,15 +47,16 @@ class FakeOvsdbNbOvnIdl(object):
         self._tables['Address_Set'] = self.addrset_table
         self._tables['DHCP_Options'] = self.dhcp_options_table
         self._tables['NAT'] = self.nat_table
-        self.transaction = _fake
-        self.create_lswitch = mock.Mock()
-        self.set_lswitch_ext_id = mock.Mock()
-        self.delete_lswitch = mock.Mock()
+        self.transaction = mock.MagicMock()
+        self.ls_add = mock.Mock()
+        self.set_lswitch_ext_ids = mock.Mock()
+        self.ls_del = mock.Mock()
         self.create_lswitch_port = mock.Mock()
         self.set_lswitch_port = mock.Mock()
         self.delete_lswitch_port = mock.Mock()
         self.get_acls_for_lswitches = mock.Mock()
         self.create_lrouter = mock.Mock()
+        self.lrp_del = mock.Mock()
         self.update_lrouter = mock.Mock()
         self.delete_lrouter = mock.Mock()
         self.add_lrouter_port = mock.Mock()
@@ -75,13 +79,11 @@ class FakeOvsdbNbOvnIdl(object):
         self.add_dhcp_options = mock.Mock()
         self.delete_dhcp_options = mock.Mock()
         self.get_subnet_dhcp_options = mock.Mock()
-        self.get_subnet_dhcp_options.return_value = {}
-        self.get_subnet_and_ports_dhcp_options = mock.Mock()
-        self.get_subnet_and_ports_dhcp_options.return_value = []
+        self.get_subnet_dhcp_options.return_value = {
+            'subnet': None, 'ports': []}
         self.get_subnets_dhcp_options = mock.Mock()
         self.get_subnets_dhcp_options.return_value = []
         self.get_all_dhcp_options = mock.Mock()
-        self.compose_dhcp_options_commands = mock.MagicMock()
         self.get_router_port_options = mock.MagicMock()
         self.get_router_port_options.return_value = {}
         self.add_nat_rule_in_lrouter = mock.Mock()
@@ -94,6 +96,28 @@ class FakeOvsdbNbOvnIdl(object):
         self.check_for_row_by_value_and_retry = mock.Mock()
         self.get_parent_port = mock.Mock()
         self.get_parent_port.return_value = []
+        self.dns_add = mock.Mock()
+        self.get_lswitch = mock.Mock()
+        fake_ovs_row = FakeOvsdbRow.create_one_ovsdb_row()
+        self.get_lswitch.return_value = fake_ovs_row
+        self.get_ls_and_dns_record = mock.Mock()
+        self.get_ls_and_dns_record.return_value = (fake_ovs_row, None)
+        self.ls_set_dns_records = mock.Mock()
+        self.get_floatingip = mock.Mock()
+        self.get_floatingip.return_value = None
+        self.check_revision_number = mock.Mock()
+        self.lookup = mock.MagicMock()
+        # TODO(lucasagomes): The get_floatingip_by_ips() method is part
+        # of a backwards compatibility layer for the Pike -> Queens release,
+        # remove it in the Rocky release.
+        self.get_floatingip_by_ips = mock.Mock()
+        self.get_floatingip_by_ips.return_value = None
+        self.is_col_present = mock.Mock()
+        self.is_col_present.return_value = False
+        self.get_lrouter = mock.Mock()
+        self.get_lrouter.return_value = None
+        self.delete_lrouter_ext_gw = mock.Mock()
+        self.delete_lrouter_ext_gw.return_value = None
 
 
 class FakeOvsdbSbOvnIdl(object):
@@ -145,6 +169,12 @@ class FakeResource(dict):
         self._add_details(info)
         self._add_methods(methods)
         self._loaded = loaded
+        # Add a revision number by default
+        setattr(self, 'revision_number', 1)
+
+    @property
+    def db_obj(self):
+        return self
 
     def _add_details(self, info):
         for (k, v) in info.items():
@@ -173,6 +203,10 @@ class FakeResource(dict):
 
     def info(self):
         return self._info
+
+    def update(self, info):
+        super(FakeResource, self).update(info)
+        self._add_details(info)
 
 
 class FakeNetwork(object):
@@ -219,6 +253,7 @@ class FakeNetworkContext(object):
     def __init__(self, network, segments):
         self.fake_network = network
         self.fake_segments = segments
+        self._plugin_context = mock.MagicMock()
 
     @property
     def current(self):
@@ -273,7 +308,8 @@ class FakeOvsdbRow(FakeResource):
         fake_uuid = uuidutils.generate_uuid()
         ovsdb_row_attrs = {
             'uuid': fake_uuid,
-            'name': 'name-' + fake_uuid
+            'name': 'name-' + fake_uuid,
+            'external_ids': {},
         }
 
         # Set default methods.
@@ -555,6 +591,7 @@ class FakeFloatingIp(object):
             'dns': '',
             'dns_domain': '',
             'dns_name': '',
+            'project_id': '',
         }
 
         # Overwrite default attributes.
@@ -562,3 +599,120 @@ class FakeFloatingIp(object):
 
         return FakeResource(info=copy.deepcopy(fip_attrs),
                             loaded=True)
+
+
+class FakeOVNPort(object):
+    """Fake one or more ports."""
+
+    @staticmethod
+    def create_one_port(attrs=None):
+        """Create a fake ovn port.
+
+        :param Dictionary attrs:
+            A dictionary with all attributes
+        :return:
+            A FakeResource object faking the port
+        """
+        attrs = attrs or {}
+
+        # Set default attributes.
+        fake_uuid = uuidutils.generate_uuid()
+        port_attrs = {
+            'addresses': [],
+            'dhcpv4_options': '',
+            'dhcpv6_options': [],
+            'enabled': True,
+            'external_ids': {},
+            'name': fake_uuid,
+            'options': {},
+            'parent_name': [],
+            'port_security': [],
+            'tag': [],
+            'tag_request': [],
+            'type': '',
+            'up': False,
+        }
+
+        # Overwrite default attributes.
+        port_attrs.update(attrs)
+        return type('Logical_Switch_Port', (object, ), port_attrs)
+
+    @staticmethod
+    def from_neutron_port(port):
+        """Create a fake ovn port based on a neutron port."""
+        external_ids = {
+            ovn_const.OVN_NETWORK_NAME_EXT_ID_KEY:
+                utils.ovn_name(port['network_id']),
+            ovn_const.OVN_SG_IDS_EXT_ID_KEY:
+                ' '.join(port['security_groups']),
+            ovn_const.OVN_DEVICE_OWNER_EXT_ID_KEY:
+                port.get('device_owner', '')}
+        addresses = [port['mac_address'], ]
+        addresses += [x['ip_address'] for x in port.get('fixed_ips', [])]
+        port_security = (
+            addresses + [x['ip_address'] for x in
+                         port.get('allowed_address_pairs', [])])
+        return FakeOVNPort.create_one_port(
+            {'external_ids': external_ids, 'addresses': addresses,
+             'port_security': port_security})
+
+
+FakeStaticRoute = collections.namedtuple(
+    'Static_Routes', ['ip_prefix', 'nexthop', 'external_ids'])
+
+
+class FakeOVNRouter(object):
+
+    @staticmethod
+    def create_one_router(attrs=None):
+        router_attrs = {
+            'enabled': False,
+            'external_ids': {},
+            'load_balancer': [],
+            'name': '',
+            'nat': [],
+            'options': {},
+            'ports': [],
+            'static_routes': [],
+        }
+
+        # Overwrite default attributes.
+        router_attrs.update(attrs)
+        return type('Logical_Router', (object, ), router_attrs)
+
+    @staticmethod
+    def from_neutron_router(router):
+
+        def _get_subnet_id(gw_info):
+            subnet_id = ''
+            ext_ips = gw_info.get('external_fixed_ips', [])
+            if ext_ips:
+                subnet_id = ext_ips[0]['subnet_id']
+            return subnet_id
+
+        external_ids = {
+            ovn_const.OVN_GW_PORT_EXT_ID_KEY: router.get('gw_port_id') or '',
+            ovn_const.OVN_ROUTER_NAME_EXT_ID_KEY:
+                router.get('name', 'no_router_name')}
+
+        # Get the routes
+        routes = []
+        for r in router.get('routes', []):
+            routes.append(FakeStaticRoute(ip_prefix=r['destination'],
+                                          nexthop=r['nexthop'],
+                                          external_ids={}))
+
+        gw_info = router.get(l3.EXTERNAL_GW_INFO)
+        if gw_info:
+            external_ids = {
+                ovn_const.OVN_ROUTER_IS_EXT_GW: 'true',
+                ovn_const.OVN_SUBNET_EXT_ID_KEY: _get_subnet_id(gw_info)}
+            routes.append(FakeStaticRoute(
+                ip_prefix='0.0.0.0/0', nexthop='',
+                external_ids=external_ids))
+
+        return FakeOVNRouter.create_one_router(
+            {'external_ids': external_ids,
+             'enabled': router.get('admin_state_up') or False,
+             'name': utils.ovn_name(router['id']),
+             'static_routes': routes})

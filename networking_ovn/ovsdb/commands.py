@@ -15,7 +15,17 @@ from ovsdbapp.backend.ovs_idl import idlutils
 
 from networking_ovn._i18n import _
 from networking_ovn.common import constants as ovn_const
+from networking_ovn.common import exceptions as ovn_exc
 from networking_ovn.common import utils
+
+RESOURCE_TYPE_MAP = {
+    ovn_const.TYPE_NETWORKS: 'Logical_Switch',
+    ovn_const.TYPE_PORTS: 'Logical_Switch_Port',
+    ovn_const.TYPE_ROUTERS: 'Logical_Router',
+    ovn_const.TYPE_ROUTER_PORTS: 'Logical_Router_Port',
+    ovn_const.TYPE_FLOATINGIPS: 'NAT',
+    ovn_const.TYPE_SUBNETS: 'DHCP_Options',
+}
 
 
 def _addvalue_to_list(row, column, new_value):
@@ -75,58 +85,11 @@ def _add_gateway_chassis(api, txn, lrp_name, val):
         return 'options', chassis
 
 
-class AddLSwitchCommand(command.BaseCommand):
-    def __init__(self, api, name, may_exist, **columns):
-        super(AddLSwitchCommand, self).__init__(api)
+class LSwitchSetExternalIdsCommand(command.BaseCommand):
+    def __init__(self, api, name, ext_ids, if_exists):
+        super(LSwitchSetExternalIdsCommand, self).__init__(api)
         self.name = name
-        self.columns = columns
-        self.may_exist = may_exist
-
-    def run_idl(self, txn):
-        if self.may_exist:
-            lswitch = idlutils.row_by_value(self.api.idl, 'Logical_Switch',
-                                            'name', self.name, None)
-            if lswitch:
-                return
-        #创建并设置switch某一行
-        row = txn.insert(self.api._tables['Logical_Switch'])
-        #填充这一行内容
-        row.name = self.name
-        for col, val in self.columns.items():
-            setattr(row, col, val)
-        #创建的行，会生成一个uuid,保存此uuid
-        self.result = row.uuid
-
-    def post_commit(self, txn):
-        #完成提交后，如果插入成功，记录可能会生成新的uuid,返回生成的实际uuid
-        self.result = txn.get_insert_uuid(self.result)
-
-
-class DelLSwitchCommand(command.BaseCommand):
-    def __init__(self, api, name, if_exists):
-        super(DelLSwitchCommand, self).__init__(api)
-        self.name = name
-        self.if_exists = if_exists
-
-    def run_idl(self, txn):
-        try:
-            lswitch = idlutils.row_by_value(self.api.idl, 'Logical_Switch',
-                                            'name', self.name)
-        except idlutils.RowNotFound:
-            if self.if_exists:
-                return
-            msg = _("Logical Switch %s does not exist") % self.name
-            raise RuntimeError(msg)
-
-        self.api._tables['Logical_Switch'].rows[lswitch.uuid].delete()
-
-
-class LSwitchSetExternalIdCommand(command.BaseCommand):
-    def __init__(self, api, name, field, value, if_exists):
-        super(LSwitchSetExternalIdCommand, self).__init__(api)
-        self.name = name
-        self.field = field
-        self.value = value
+        self.ext_ids = ext_ids
         self.if_exists = if_exists
 
     def run_idl(self, txn):
@@ -141,9 +104,9 @@ class LSwitchSetExternalIdCommand(command.BaseCommand):
             raise RuntimeError(msg)
 
         lswitch.verify('external_ids')
-
         external_ids = getattr(lswitch, 'external_ids', {})
-        external_ids[self.field] = self.value
+        for key, value in self.ext_ids.items():
+            external_ids[key] = value
         lswitch.external_ids = external_ids
 
 
@@ -336,10 +299,11 @@ class DelLRouterCommand(command.BaseCommand):
 
 
 class AddLRouterPortCommand(command.BaseCommand):
-    def __init__(self, api, name, lrouter, **columns):
+    def __init__(self, api, name, lrouter, may_exist, **columns):
         super(AddLRouterPortCommand, self).__init__(api)
         self.name = name
         self.lrouter = lrouter
+        self.may_exist = may_exist
         self.columns = columns
 
     def run_idl(self, txn):
@@ -353,6 +317,8 @@ class AddLRouterPortCommand(command.BaseCommand):
         try:
             idlutils.row_by_value(self.api.idl, 'Logical_Router_Port',
                                   'name', self.name)
+            if self.may_exist:
+                return
             # The LRP entry with certain name has already exist, raise an
             # exception to notice caller. It's caller's responsibility to
             # call UpdateLRouterPortCommand to get LRP entry processed
@@ -470,7 +436,6 @@ class AddACLCommand(command.BaseCommand):
         row = txn.insert(self.api._tables['ACL'])
         for col, val in self.columns.items():
             setattr(row, col, val)
-        row.external_ids = {'neutron:lport': self.lport}
         _addvalue_to_list(lswitch, 'acls', row.uuid)
 
 
@@ -600,15 +565,18 @@ class UpdateACLsCommand(command.BaseCommand):
         else:
             acl_add_values_dict = {}
             acl_del_objs_dict = {}
-            del_acl_matches = []
+            del_acl_extids = []
             for acl_dict in self.acl_new_values_dict.values():
-                del_acl_matches.append(acl_dict['match'])
+                del_acl_extids.append({acl_dict['match']:
+                                       acl_dict['external_ids']})
             for switch_name, lswitch in lswitch_ovsdb_dict.items():
                 if switch_name not in acl_del_objs_dict:
                     acl_del_objs_dict[switch_name] = []
                 acls = getattr(lswitch, 'acls', [])
                 for acl in acls:
-                    if getattr(acl, 'match') in del_acl_matches:
+                    match = getattr(acl, 'match')
+                    acl_extids = {match: getattr(acl, 'external_ids')}
+                    if acl_extids in del_acl_extids:
                         acl_del_objs_dict[switch_name].append(acl)
         return lswitch_ovsdb_dict, acl_del_objs_dict, acl_add_values_dict
 
@@ -845,11 +813,11 @@ class UpdatePortBindingExtIdsCommand(command.BaseCommand):
 
 
 class AddDHCPOptionsCommand(command.BaseCommand):
-    def __init__(self, api, subnet_id, port_id=None, may_exists=True,
+    def __init__(self, api, subnet_id, port_id=None, may_exist=True,
                  **columns):
         super(AddDHCPOptionsCommand, self).__init__(api)
         self.columns = columns
-        self.may_exists = may_exists
+        self.may_exist = may_exist
         self.subnet_id = subnet_id
         self.port_id = port_id
         self.new_insert = False
@@ -864,7 +832,7 @@ class AddDHCPOptionsCommand(command.BaseCommand):
 
     def run_idl(self, txn):
         row = None
-        if self.may_exists:
+        if self.may_exist:
             row = self._get_dhcp_options_row()
 
         if not row:
@@ -1046,3 +1014,136 @@ class DeleteNatIpFromLRPortPeerOptionsCommand(command.BaseCommand):
         else:
             options['nat-addresses'] = nat_ips
         lport.options = options
+
+
+class CheckRevisionNumberCommand(command.BaseCommand):
+
+    def __init__(self, api, name, resource, resource_type, if_exists):
+        super(CheckRevisionNumberCommand, self).__init__(api)
+        self.name = name
+        self.resource = resource
+        self.resource_type = resource_type
+        self.if_exists = if_exists
+
+    def _get_floatingip(self):
+        # TODO(lucasagomes): We can't use self.api.lookup() because that
+        # method does not introspect map type columns. We could either:
+        # 1. Enhance it to look into maps or, 2. Add a new ``name`` column
+        # to the NAT table so that we can use lookup() just like we do
+        # for other resources
+        for nat in self.api._tables['NAT'].rows.values():
+            if nat.type != 'dnat_and_snat':
+                continue
+            ext_ids = getattr(nat, 'external_ids', {})
+            if ext_ids.get(ovn_const.OVN_FIP_EXT_ID_KEY) == self.name:
+                return nat
+
+        raise idlutils.RowNotFound(
+            table='NAT', col='external_ids', match=self.name)
+
+    def _get_subnet(self):
+        for dhcp in self.api._tables['DHCP_Options'].rows.values():
+            ext_ids = getattr(dhcp, 'external_ids', {})
+            # Ignore ports DHCP Options
+            if ext_ids.get('port_id'):
+                continue
+            if ext_ids.get('subnet_id') == self.name:
+                return dhcp
+
+        raise idlutils.RowNotFound(
+            table='DHCP_Options', col='external_ids', match=self.name)
+
+    def run_idl(self, txn):
+        try:
+            ovn_table = RESOURCE_TYPE_MAP[self.resource_type]
+            # TODO(lucasagomes): After OVS 2.8.2 is released all tables should
+            # have the external_ids column. We can remove this conditional
+            # here by then.
+            if not self.api.is_col_present(ovn_table, 'external_ids'):
+                return
+
+            ovn_resource = None
+            if self.resource_type == ovn_const.TYPE_FLOATINGIPS:
+                ovn_resource = self._get_floatingip()
+            elif self.resource_type == ovn_const.TYPE_SUBNETS:
+                ovn_resource = self._get_subnet()
+            else:
+                ovn_resource = self.api.lookup(ovn_table, self.name)
+        except idlutils.RowNotFound:
+            if self.if_exists:
+                return
+            msg = (_('Failed to check the revision number for %s: Resource '
+                     'does not exist') % self.name)
+            raise RuntimeError(msg)
+
+        external_ids = getattr(ovn_resource, 'external_ids', {})
+        ovn_revision = int(external_ids.get(
+            ovn_const.OVN_REV_NUM_EXT_ID_KEY, -1))
+        neutron_revision = utils.get_revision_number(self.resource,
+                                                     self.resource_type)
+        if ovn_revision > neutron_revision:
+            raise ovn_exc.RevisionConflict(
+                resource_id=self.name, resource_type=self.resource_type)
+
+        ovn_resource.verify('external_ids')
+        ovn_resource.setkey('external_ids', ovn_const.OVN_REV_NUM_EXT_ID_KEY,
+                            str(neutron_revision))
+
+    def post_commit(self, txn):
+        self.result = ovn_const.TXN_COMMITTED
+
+
+class DeleteLRouterExtGwCommand(command.BaseCommand):
+
+    def __init__(self, api, lrouter, if_exists):
+        super(DeleteLRouterExtGwCommand, self).__init__(api)
+        self.lrouter = lrouter
+        self.if_exists = if_exists
+
+    def run_idl(self, txn):
+        # TODO(lucasagomes): Remove this check after OVS 2.8.2 is tagged
+        # (prior to that, the external_ids column didn't exist in this
+        # table).
+        if not self.api.is_col_present('Logical_Router_Static_Route',
+                                       'external_ids'):
+            return
+
+        try:
+            lrouter = idlutils.row_by_value(self.api.idl, 'Logical_Router',
+                                            'name', self.lrouter)
+        except idlutils.RowNotFound:
+            if self.if_exists:
+                return
+            msg = _("Logical Router %s does not exist") % self.lrouter
+            raise RuntimeError(msg)
+
+        lrouter.verify('static_routes')
+        static_routes = getattr(lrouter, 'static_routes', [])
+        for route in static_routes:
+            external_ids = getattr(route, 'external_ids', {})
+            if ovn_const.OVN_ROUTER_IS_EXT_GW in external_ids:
+                _delvalue_from_list(lrouter, 'static_routes', route)
+                route.delete()
+                break
+
+        lrouter.verify('nat')
+        nats = getattr(lrouter, 'nat', [])
+        for nat in nats:
+            if nat.type != 'snat':
+                continue
+            _delvalue_from_list(lrouter, 'nat', nat)
+            nat.delete()
+
+        lrouter_ext_ids = getattr(lrouter, 'external_ids', {})
+        gw_port_id = lrouter_ext_ids.get(ovn_const.OVN_GW_PORT_EXT_ID_KEY)
+        if not gw_port_id:
+            return
+
+        try:
+            lrouter_port = idlutils.row_by_value(
+                self.api.idl, 'Logical_Router_Port', 'name',
+                utils.ovn_lrouter_port_name(gw_port_id))
+        except idlutils.RowNotFound:
+            return
+
+        _delvalue_from_list(lrouter, 'ports', lrouter_port)

@@ -173,7 +173,8 @@ def add_sg_rule_acl_for_port(port, r, match):
            "severity": [],
            "direction": dir_map[r['direction']],
            "match": match,
-           "external_ids": {'neutron:lport': port['id']}}
+           "external_ids": {'neutron:lport': port['id'],
+                            ovn_const.OVN_SG_RULE_EXT_ID_KEY: r['id']}}
     return acl
 
 
@@ -307,6 +308,9 @@ def update_acls_for_security_group(plugin,
     sg_port_ids = list(set(sg_port_ids))
     port_list = plugin.get_ports(admin_context,
                                  filters={'id': sg_port_ids})
+    if not port_list:
+        return
+
     acl_new_values_dict = {}
     update_port_list = []
 
@@ -318,6 +322,7 @@ def update_acls_for_security_group(plugin,
         # Skip trusted port
         if utils.is_lsp_trusted(port):
             continue
+
         update_port_list.append(port)
         acl = _add_sg_rule_acl_for_port(port, security_group_rule)
         # Remove lport and lswitch since we don't need them
@@ -378,8 +383,7 @@ def add_acls(plugin, admin_context, port, sg_cache, subnet_cache, ovn):
                                 sg_id)
         for r in sg['security_group_rules']:
             acl = _add_sg_rule_acl_for_port(port, r)
-            if acl not in acl_list:
-                acl_list.append(acl)
+            acl_list.append(acl)
 
     # Remove ACL log name and severity if not supported,
     if not _acl_columns_name_severity_supported(ovn):
@@ -395,16 +399,6 @@ def acl_port_ips(port):
     if not is_sg_enabled():
         return {'ip4': [], 'ip6': []}
 
-    ip_addresses = {4: [], 6: []}
-    for fixed_ip in port['fixed_ips']:
-        ip_version = netaddr.IPNetwork(fixed_ip['ip_address']).version
-        ip_addresses[ip_version].append(fixed_ip['ip_address'])
-
-    for allowed_ip in port.get('allowed_address_pairs', []):
-        if allowed_ip.get('ip_address'):
-            ip_version = \
-                netaddr.IPNetwork(allowed_ip['ip_address']).version
-            ip_addresses[ip_version].append(allowed_ip['ip_address'])
-
-    return {'ip4': ip_addresses[4],
-            'ip6': ip_addresses[6]}
+    ip_list = [x['ip_address'] for x in port.get('fixed_ips', [])]
+    ip_list.extend(utils.get_allowed_address_pairs_ip_addresses(port))
+    return utils.sort_ips_by_version(ip_list)

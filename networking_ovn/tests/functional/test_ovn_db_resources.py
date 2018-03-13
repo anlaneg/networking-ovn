@@ -16,11 +16,14 @@
 import mock
 import netaddr
 
+from neutron_lib.api.definitions import dns as dns_apidef
 from neutron_lib.utils import net as n_net
 from oslo_config import cfg
 from ovsdbapp.backend.ovs_idl import idlutils
 
 from networking_ovn.common import config as ovn_config
+from networking_ovn.common import constants as ovn_const
+from networking_ovn.common import utils
 from networking_ovn.tests.functional import base
 
 
@@ -28,9 +31,6 @@ class TestNBDbResources(base.TestOVNFunctionalBase):
 
     def setUp(self):
         super(TestNBDbResources, self).setUp()
-        self.fake_api = mock.MagicMock()
-        self.fake_api.idl = self.monitor_nb_db_idl
-        self.fake_api._tables = self.monitor_nb_db_idl.tables
         self.orig_get_random_mac = n_net.get_random_mac
         cfg.CONF.set_override('quota_subnet', -1, group='QUOTAS')
         ovn_config.cfg.CONF.set_override('ovn_metadata_enabled',
@@ -40,12 +40,22 @@ class TestNBDbResources(base.TestOVNFunctionalBase):
     def tearDown(self):
         super(TestNBDbResources, self).tearDown()
 
+    # FIXME(lucasagomes): Map the revision numbers properly instead
+    # of stripping them out. Currently, tests like test_dhcp_options()
+    # are quite complex making it difficult to map the exact the revision
+    # number that the DHCP Option will be at assertion time, we need to
+    # refactor it a little to make it easier for mapping these updates.
+    def _strip_revision_number(self, ext_ids):
+        ext_ids.pop(ovn_const.OVN_REV_NUM_EXT_ID_KEY, None)
+        return ext_ids
+
     def _verify_dhcp_option_rows(self, expected_dhcp_options_rows):
         expected_dhcp_options_rows = list(expected_dhcp_options_rows.values())
         observed_dhcp_options_rows = []
-        for row in self.monitor_nb_db_idl.tables['DHCP_Options'].rows.values():
+        for row in self.nb_api.tables['DHCP_Options'].rows.values():
+            ext_ids = self._strip_revision_number(row.external_ids)
             observed_dhcp_options_rows.append({
-                'cidr': row.cidr, 'external_ids': row.external_ids,
+                'cidr': row.cidr, 'external_ids': ext_ids,
                 'options': row.options})
 
         self.assertItemsEqual(expected_dhcp_options_rows,
@@ -54,22 +64,26 @@ class TestNBDbResources(base.TestOVNFunctionalBase):
     def _verify_dhcp_option_row_for_port(self, port_id,
                                          expected_lsp_dhcpv4_options,
                                          expected_lsp_dhcpv6_options=None):
-        lsp = idlutils.row_by_value(self.monitor_nb_db_idl,
+        lsp = idlutils.row_by_value(self.nb_api.idl,
                                     'Logical_Switch_Port', 'name', port_id,
                                     None)
 
         if lsp.dhcpv4_options:
+            ext_ids = self._strip_revision_number(
+                lsp.dhcpv4_options[0].external_ids)
             observed_lsp_dhcpv4_options = {
                 'cidr': lsp.dhcpv4_options[0].cidr,
-                'external_ids': lsp.dhcpv4_options[0].external_ids,
+                'external_ids': ext_ids,
                 'options': lsp.dhcpv4_options[0].options}
         else:
             observed_lsp_dhcpv4_options = {}
 
         if lsp.dhcpv6_options:
+            ext_ids = self._strip_revision_number(
+                lsp.dhcpv6_options[0].external_ids)
             observed_lsp_dhcpv6_options = {
                 'cidr': lsp.dhcpv6_options[0].cidr,
-                'external_ids': lsp.dhcpv6_options[0].external_ids,
+                'external_ids': ext_ids,
                 'options': lsp.dhcpv6_options[0].options}
         else:
             observed_lsp_dhcpv6_options = {}
@@ -83,10 +97,9 @@ class TestNBDbResources(base.TestOVNFunctionalBase):
                          observed_lsp_dhcpv6_options)
 
     def _get_subnet_dhcp_mac(self, subnet):
-
         mac_key = 'server_id' if subnet['ip_version'] == 6 else 'server_mac'
         dhcp_options = self.mech_driver._nb_ovn.get_subnet_dhcp_options(
-            subnet['id'])
+            subnet['id'])['subnet']
         return dhcp_options.get('options', {}).get(
             mac_key) if dhcp_options else None
 
@@ -408,6 +421,18 @@ class TestNBDbResources(base.TestOVNFunctionalBase):
             expected_dhcp_options_rows['v4-' + p4['port']['id']]
         expected_dhcp_v6_options_rows['v6-' + p4['port']['id']] = \
             expected_dhcp_options_rows['v6-' + p4['port']['id']]
+
+        # test port without extra_dhcp_opts but using subnet DHCP options
+        data = {
+            'port': {'network_id': n1['network']['id'],
+                     'tenant_id': self._tenant_id,
+                     'device_owner': 'compute:None',
+                     'fixed_ips': [{'subnet_id': subnet['id']},
+                                   {'subnet_id': subnet_v6['id']}]}}
+        port_req = self.new_create_request('ports', data, self.fmt)
+        port_res = port_req.get_response(self.api)
+        p5 = self.deserialize(self.fmt, port_res)
+
         self._verify_dhcp_option_rows(expected_dhcp_options_rows)
 
         self._verify_dhcp_option_row_for_port(
@@ -425,6 +450,11 @@ class TestNBDbResources(base.TestOVNFunctionalBase):
             expected_dhcp_options_rows['v4-' + p4['port']['id']],
             expected_lsp_dhcpv6_options=expected_dhcp_options_rows[
                 'v6-' + p4['port']['id']])
+        self._verify_dhcp_option_row_for_port(
+            p5['port']['id'],
+            expected_dhcp_options_rows[subnet['id']],
+            expected_lsp_dhcpv6_options=expected_dhcp_options_rows[
+                subnet_v6['id']])
 
         # Update the subnet with dns_server. It should get propagated
         # to the DHCP options of the p1. Note that it should not get
@@ -464,12 +494,14 @@ class TestNBDbResources(base.TestOVNFunctionalBase):
         self._verify_dhcp_option_rows(expected_dhcp_options_rows)
 
         # Test subnet DHCP disabling and enabling
-        for (subnet_id, expect_subnet_rows_disabled,
-             expect_port_v4_row_disabled, expect_port_v6_row_disabled) in [
-            (subnet['id'], expected_dhcp_v6_options_rows, {},
-             expected_dhcp_options_rows['v6-' + p4['port']['id']]),
+        for (subnet_id, expect_subnet_rows_disabled, expect_port_row_disabled
+             ) in [
+            (subnet['id'], expected_dhcp_v6_options_rows,
+             [(p4, {}, expected_dhcp_options_rows['v6-' + p4['port']['id']]),
+              (p5, {}, expected_dhcp_options_rows[subnet_v6['id']])]),
             (subnet_v6['id'], expected_dhcp_v4_options_rows,
-             expected_dhcp_options_rows['v4-' + p4['port']['id']], {})]:
+             [(p4, expected_dhcp_options_rows['v4-' + p4['port']['id']], {}),
+              (p5, expected_dhcp_options_rows[subnet['id']], {})])]:
             # Disable subnet's DHCP and verify DHCP_Options,
             data = {'subnet': {'enable_dhcp': False}}
             req = self.new_update_request('subnets', data, subnet_id)
@@ -480,9 +512,9 @@ class TestNBDbResources(base.TestOVNFunctionalBase):
             self._verify_dhcp_option_rows(expect_subnet_rows_disabled)
             # Verify that the corresponding port DHCP options were cleared
             # and the others were not affected.
-            self._verify_dhcp_option_row_for_port(
-                p4['port']['id'], expect_port_v4_row_disabled,
-                expect_port_v6_row_disabled)
+            for p in expect_port_row_disabled:
+                self._verify_dhcp_option_row_for_port(
+                    p[0]['port']['id'], p[1], p[2])
             # Re-enable dhcpv4 in subnet and verify DHCP_Options
             n_net.get_random_mac = mock.Mock()
             n_net.get_random_mac.return_value = dhcp_mac[subnet_id]
@@ -494,6 +526,11 @@ class TestNBDbResources(base.TestOVNFunctionalBase):
                 p4['port']['id'],
                 expected_dhcp_options_rows['v4-' + p4['port']['id']],
                 expected_dhcp_options_rows['v6-' + p4['port']['id']])
+            self._verify_dhcp_option_row_for_port(
+                p5['port']['id'],
+                expected_dhcp_options_rows[subnet['id']],
+                expected_lsp_dhcpv6_options=expected_dhcp_options_rows[
+                    subnet_v6['id']])
         n_net.get_random_mac = self.orig_get_random_mac
 
         # Disable dhcp in p2
@@ -675,6 +712,146 @@ class TestNBDbResources(base.TestOVNFunctionalBase):
         # The Logical_Switch_Port.dhcpv4_options for this port should be
         # empty.
         self._verify_dhcp_option_row_for_port(p1['id'], {})
+
+
+class TestDNSRecords(base.TestOVNFunctionalBase):
+    _extension_drivers = ['port_security', 'dns']
+
+    def _validate_dns_records(self, expected_dns_records):
+        observed_dns_records = []
+        for dns_row in self.nb_api.tables['DNS'].rows.values():
+            observed_dns_records.append(
+                {'external_ids': dns_row.external_ids,
+                 'records': dns_row.records})
+        self.assertItemsEqual(expected_dns_records, observed_dns_records)
+
+    def _validate_ls_dns_records(self, lswitch_name, expected_dns_records):
+        ls = idlutils.row_by_value(self.nb_api.idl,
+                                   'Logical_Switch', 'name', lswitch_name)
+        observed_dns_records = []
+        for dns_row in ls.dns_records:
+            observed_dns_records.append(
+                {'external_ids': dns_row.external_ids,
+                 'records': dns_row.records})
+        self.assertItemsEqual(expected_dns_records, observed_dns_records)
+
+    def setUp(self):
+        ovn_config.cfg.CONF.set_override('dns_domain', 'ovn.test')
+        super(TestDNSRecords, self).setUp()
+
+    def test_dns_records(self):
+        expected_dns_records = []
+        nets = []
+        for n, cidr in [('n1', '10.0.0.0/24'), ('n2', '20.0.0.0/24')]:
+            net_kwargs = {dns_apidef.DNSDOMAIN: 'ovn.test.'}
+            net_kwargs['arg_list'] = (dns_apidef.DNSDOMAIN,)
+            res = self._create_network(self.fmt, n, True, **net_kwargs)
+            net = self.deserialize(self.fmt, res)
+            nets.append(net)
+            res = self._create_subnet(self.fmt, net['network']['id'], cidr)
+            self.deserialize(self.fmt, res)
+
+        # At this point no dns records should be created
+        n1_lswitch_name = utils.ovn_name(nets[0]['network']['id'])
+        n2_lswitch_name = utils.ovn_name(nets[1]['network']['id'])
+        self._validate_dns_records(expected_dns_records)
+        self._validate_ls_dns_records(n1_lswitch_name, expected_dns_records)
+        self._validate_ls_dns_records(n2_lswitch_name, expected_dns_records)
+
+        port_kwargs = {'arg_list': (dns_apidef.DNSNAME,),
+                       dns_apidef.DNSNAME: 'n1p1'}
+        res = self._create_port(self.fmt, nets[0]['network']['id'],
+                                device_id='n1p1', **port_kwargs)
+        n1p1 = self.deserialize(self.fmt, res)
+        port_ips = " ".join([f['ip_address']
+                             for f in n1p1['port']['fixed_ips']])
+        expected_dns_records = [
+            {'external_ids': {'ls_name': n1_lswitch_name},
+             'records': {'n1p1': port_ips, 'n1p1.ovn.test.': port_ips}}
+        ]
+
+        self._validate_dns_records(expected_dns_records)
+        self._validate_ls_dns_records(n1_lswitch_name,
+                                      [expected_dns_records[0]])
+        self._validate_ls_dns_records(n2_lswitch_name, [])
+
+        # Create another port, but don't set dns_name. dns record should not
+        # be updated.
+        res = self._create_port(self.fmt, nets[1]['network']['id'],
+                                device_id='n2p1')
+        n2p1 = self.deserialize(self.fmt, res)
+        self._validate_dns_records(expected_dns_records)
+
+        # Update port p2 with dns_name. The dns record should be updated.
+        body = {'dns_name': 'n2p1'}
+        data = {'port': body}
+        req = self.new_update_request('ports', data, n2p1['port']['id'])
+        res = req.get_response(self.api)
+        self.assertEqual(200, res.status_int)
+
+        port_ips = " ".join([f['ip_address']
+                             for f in n2p1['port']['fixed_ips']])
+        expected_dns_records.append(
+            {'external_ids': {'ls_name': n2_lswitch_name},
+             'records': {'n2p1': port_ips, 'n2p1.ovn.test.': port_ips}})
+        self._validate_dns_records(expected_dns_records)
+        self._validate_ls_dns_records(n1_lswitch_name,
+                                      [expected_dns_records[0]])
+        self._validate_ls_dns_records(n2_lswitch_name,
+                                      [expected_dns_records[1]])
+
+        # Create n1p2
+        port_kwargs = {'arg_list': (dns_apidef.DNSNAME,),
+                       dns_apidef.DNSNAME: 'n1p2'}
+        res = self._create_port(self.fmt, nets[0]['network']['id'],
+                                device_id='n1p1', **port_kwargs)
+        n1p2 = self.deserialize(self.fmt, res)
+        port_ips = " ".join([f['ip_address']
+                             for f in n1p2['port']['fixed_ips']])
+        expected_dns_records[0]['records']['n1p2'] = port_ips
+        expected_dns_records[0]['records']['n1p2.ovn.test.'] = port_ips
+        self._validate_dns_records(expected_dns_records)
+        self._validate_ls_dns_records(n1_lswitch_name,
+                                      [expected_dns_records[0]])
+        self._validate_ls_dns_records(n2_lswitch_name,
+                                      [expected_dns_records[1]])
+
+        # Remove device_id from n1p1
+        body = {'device_id': ''}
+        data = {'port': body}
+        req = self.new_update_request('ports', data, n1p1['port']['id'])
+        res = req.get_response(self.api)
+        self.assertEqual(200, res.status_int)
+
+        expected_dns_records[0]['records'].pop('n1p1')
+        expected_dns_records[0]['records'].pop('n1p1.ovn.test.')
+        self._validate_dns_records(expected_dns_records)
+        self._validate_ls_dns_records(n1_lswitch_name,
+                                      [expected_dns_records[0]])
+        self._validate_ls_dns_records(n2_lswitch_name,
+                                      [expected_dns_records[1]])
+
+        # Delete n2p1
+        self._delete('ports', n2p1['port']['id'])
+        expected_dns_records[1]['records'] = {}
+        self._validate_dns_records(expected_dns_records)
+        self._validate_ls_dns_records(n1_lswitch_name,
+                                      [expected_dns_records[0]])
+        self._validate_ls_dns_records(n2_lswitch_name,
+                                      [expected_dns_records[1]])
+
+        # Delete n2
+        self._delete('networks', nets[1]['network']['id'])
+        del expected_dns_records[1]
+        self._validate_dns_records(expected_dns_records)
+        self._validate_ls_dns_records(n1_lswitch_name,
+                                      [expected_dns_records[0]])
+
+        # Delete n1p1 and n1p2 and n1
+        self._delete('ports', n1p1['port']['id'])
+        self._delete('ports', n1p2['port']['id'])
+        self._delete('networks', nets[0]['network']['id'])
+        self._validate_dns_records([])
 
 
 class TestNBDbResourcesOverTcp(TestNBDbResources):

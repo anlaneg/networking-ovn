@@ -22,6 +22,49 @@ import psutil
 import tenacity
 
 
+class OvnNorthd(fixtures.Fixture):
+
+    def __init__(self, temp_dir, ovn_nb_db, ovn_sb_db, protocol='unix'):
+        super(OvnNorthd, self).__init__()
+        self.temp_dir = temp_dir
+        self.ovn_nb_db = ovn_nb_db
+        self.ovn_sb_db = ovn_sb_db
+        self.protocol = protocol
+        self.unixctl_path = self.temp_dir + '/ovn_northd.ctl'
+        self.log_file_path = self.temp_dir + '/ovn_northd.log'
+        if self.protocol == 'ssl':
+            self.private_key = os.path.join(self.temp_dir, 'ovn-privkey.pem')
+            self.certificate = os.path.join(self.temp_dir, 'ovn-cert.pem')
+            self.ca_cert = os.path.join(self.temp_dir, 'controllerca',
+                                        'cacert.pem')
+
+    def _setUp(self):
+        self.addCleanup(self.stop)
+        self.start()
+
+    def start(self):
+        # start the ovn-northd
+        ovn_northd_cmd = [
+            spawn.find_executable('ovn-northd'), '-vconsole:off',
+            '--ovnnb-db=%s' % self.ovn_nb_db,
+            '--ovnsb-db=%s' % self.ovn_sb_db,
+            '--no-chdir',
+            '--unixctl=%s' % self.unixctl_path,
+            '--log-file=%s' % (self.log_file_path)]
+        if self.protocol == 'ssl':
+            ovn_northd_cmd.append('--private-key=%s' % self.private_key)
+            ovn_northd_cmd.append('--certificate=%s' % self.certificate)
+            ovn_northd_cmd.append('--ca-cert=%s' % self.ca_cert)
+        utils.create_process(ovn_northd_cmd)
+
+    def stop(self):
+        try:
+            stop_cmd = ['ovs-appctl', '-t', self.unixctl_path, 'exit']
+            utils.execute(stop_cmd)
+        except Exception:
+            pass
+
+
 class OvsdbServer(fixtures.Fixture):
 
     def __init__(self, temp_dir, ovs_dir, ovn_nb_db=True, ovn_sb_db=False,
@@ -47,10 +90,12 @@ class OvsdbServer(fixtures.Fixture):
                  'remote_path': self.temp_dir + '/ovnnb_db.sock',
                  'protocol': self.protocol,
                  'remote_ip': '127.0.0.1',
-                 'remote_port': '6641',
+                 'remote_port': '0',
                  'unixctl_path': self.temp_dir + '/ovnnb_db.ctl',
                  'log_file_path': self.temp_dir + '/ovn_nb.log',
-                 'db_type': 'nb'})
+                 'db_type': 'nb',
+                 'connection': 'db:OVN_Northbound,NB_Global,connections',
+                 'ctl_cmd': 'ovn-nbctl'})
 
         if self.ovn_sb_db:
             self.ovsdb_server_processes.append(
@@ -59,10 +104,12 @@ class OvsdbServer(fixtures.Fixture):
                  'remote_path': self.temp_dir + '/ovnsb_db.sock',
                  'protocol': self.protocol,
                  'remote_ip': '127.0.0.1',
-                 'remote_port': '6642',
+                 'remote_port': '0',
                  'unixctl_path': self.temp_dir + '/ovnsb_db.ctl',
                  'log_file_path': self.temp_dir + '/ovn_sb.log',
-                 'db_type': 'sb'})
+                 'db_type': 'sb',
+                 'connection': 'db:OVN_Southbound,SB_Global,connections',
+                 'ctl_cmd': 'ovn-sbctl'})
         self.addCleanup(self.stop)
         self.start()
 
@@ -91,12 +138,8 @@ class OvsdbServer(fixtures.Fixture):
                 spawn.find_executable('ovsdb-server'), '-vconsole:off',
                 '--log-file=%s' % (ovsdb_process['log_file_path']),
                 '--remote=punix:%s' % (ovsdb_process['remote_path']),
+                '--remote=%s' % (ovsdb_process['connection']),
                 '--unixctl=%s' % (ovsdb_process['unixctl_path'])]
-            if ovsdb_process['protocol'] != 'unix':
-                ovsdb_server_cmd.append(
-                    '--remote=p%s:0:%s' % (ovsdb_process['protocol'],
-                                           ovsdb_process['remote_ip'])
-                )
             if ovsdb_process['protocol'] == 'ssl':
                 if not pki_done:
                     pki_done = True
@@ -106,6 +149,20 @@ class OvsdbServer(fixtures.Fixture):
                 ovsdb_server_cmd.append('--ca-cert=%s' % self.ca_cert)
             ovsdb_server_cmd.append(ovsdb_process['db_path'])
             obj, _ = utils.create_process(ovsdb_server_cmd)
+
+            conn_cmd = [spawn.find_executable(ovsdb_process['ctl_cmd']),
+                        '--db=unix:%s' % ovsdb_process['remote_path'],
+                        'set-connection',
+                        'p%s:%s:%s' % (ovsdb_process['protocol'],
+                                       ovsdb_process['remote_port'],
+                                       ovsdb_process['remote_ip']),
+                        '--', 'set', 'connection', '.',
+                        'inactivity_probe=60000']
+
+            @tenacity.retry(wait=tenacity.wait_exponential(multiplier=0.1),
+                            stop=tenacity.stop_after_delay(3), reraise=True)
+            def _set_connection():
+                utils.execute(conn_cmd)
 
             @tenacity.retry(
                 wait=tenacity.wait_exponential(multiplier=0.1),
@@ -119,6 +176,7 @@ class OvsdbServer(fixtures.Fixture):
                 raise Exception(_("Could not find LISTEN port."))
 
             if ovsdb_process['protocol'] != 'unix':
+                _set_connection()
                 ovsdb_process['remote_port'] = \
                     get_ovsdb_remote_port_retry(obj.pid)
 
@@ -128,9 +186,6 @@ class OvsdbServer(fixtures.Fixture):
                 stop_cmd = ['ovs-appctl', '-t', ovsdb_process['unixctl_path'],
                             'exit']
                 utils.execute(stop_cmd)
-                # Delete the db
-                cmd = ['rm', '-f', ovsdb_process['db_path']]
-                utils.execute(cmd)
             except Exception:
                 pass
 

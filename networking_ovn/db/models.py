@@ -17,38 +17,24 @@ from neutron_lib.db import model_base
 import sqlalchemy as sa
 from sqlalchemy.dialects import sqlite
 
-from networking_ovn.journal import constants as journal_const
 
-
-class OVNJournal(model_base.BASEV2):
-    __tablename__ = 'ovn_journal'
-
-    seqnum = sa.Column(sa.BigInteger().with_variant(sa.Integer(), 'sqlite'),
-                       primary_key=True, autoincrement=True)
-    object_type = sa.Column(sa.String(36), nullable=False)
-    object_uuid = sa.Column(sa.String(36), nullable=False)
-    operation = sa.Column(sa.String(36), nullable=False)
-    data = sa.Column(sa.PickleType, nullable=True)
-    state = sa.Column(sa.Enum(journal_const.PENDING,
-                              journal_const.FAILED,
-                              journal_const.PROCESSING,
-                              journal_const.COMPLETED),
-                      nullable=False, default=journal_const.PENDING)
-    retry_count = sa.Column(sa.Integer, default=0)
+class OVNRevisionNumbers(model_base.BASEV2):
+    __tablename__ = 'ovn_revision_numbers'
+    __table_args__ = (
+        model_base.BASEV2.__table_args__
+    )
+    standard_attr_id = sa.Column(
+        sa.BigInteger().with_variant(sa.Integer(), 'sqlite'),
+        sa.ForeignKey('standardattributes.id', ondelete='SET NULL'),
+        nullable=True)
+    resource_uuid = sa.Column(sa.String(36), nullable=False, primary_key=True)
+    resource_type = sa.Column(sa.String(36), nullable=False, primary_key=True)
+    revision_number = sa.Column(
+        sa.BigInteger().with_variant(sa.Integer(), 'sqlite'),
+        server_default='0', nullable=False)
     created_at = sa.Column(
         sa.DateTime().with_variant(
             sqlite.DATETIME(truncate_microseconds=True), 'sqlite'),
-        server_default=sa.func.now())
-    last_retried = sa.Column(sa.TIMESTAMP, server_default=sa.func.now(),
-                             onupdate=sa.func.now())
-
-
-class OVNMaintenance(model_base.BASEV2, model_base.HasId):
-    __tablename__ = 'ovn_maintenance'
-
-    state = sa.Column(sa.Enum(journal_const.PENDING, journal_const.PROCESSING),
-                      nullable=False)
-    processing_operation = sa.Column(sa.String(70))
-    lock_updated = sa.Column(sa.TIMESTAMP, nullable=False,
-                             server_default=sa.func.now(),
-                             onupdate=sa.func.now())
+        default=sa.func.now())
+    updated_at = sa.Column(sa.TIMESTAMP, server_default=sa.func.now(),
+                           onupdate=sa.func.now())

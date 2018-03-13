@@ -12,7 +12,9 @@
 #    under the License.
 #
 
+from neutron_lib.api.definitions import external_net
 from neutron_lib.api.definitions import l3
+from neutron_lib.api.definitions import portbindings
 from neutron_lib.api.definitions import provider_net as pnet
 from neutron_lib.callbacks import events
 from neutron_lib.callbacks import registry
@@ -31,12 +33,13 @@ from neutron.db import dns_db
 from neutron.db import extraroute_db
 from neutron.db import l3_gwmode_db
 from neutron.db.models import l3 as l3_models
-from neutron.extensions import external_net
 from neutron.quota import resource_registry
 
+from networking_ovn.common import constants as ovn_const
 from networking_ovn.common import extensions
 from networking_ovn.common import ovn_client
 from networking_ovn.common import utils
+from networking_ovn.db import revision as db_rev
 from networking_ovn.l3 import l3_ovn_scheduler
 from networking_ovn.ovsdb import impl_idl_ovn
 
@@ -69,6 +72,15 @@ class OVNL3RouterPlugin(service_base.ServicePluginBase,
         self._plugin_property = None
         self._ovn_client_inst = None
         self.scheduler = l3_ovn_scheduler.get_scheduler()
+        self._register_precommit_callbacks()
+
+    def _register_precommit_callbacks(self):
+        registry.subscribe(
+            self.create_router_precommit, resources.ROUTER,
+            events.PRECOMMIT_CREATE)
+        registry.subscribe(
+            self.create_floatingip_precommit, resources.FLOATING_IP,
+            events.PRECOMMIT_CREATE)
 
     @property
     def _ovn_client(self):
@@ -111,68 +123,16 @@ class OVNL3RouterPlugin(service_base.ServicePluginBase,
         return ("L3 Router Service Plugin for basic L3 forwarding"
                 " using OVN")
 
-    def _get_router_ports(self, context, router_id, get_gw_port=False):
-        #取路由器的所有port
-        router_db = self._get_router(context.elevated(), router_id)
-        if get_gw_port:
-            return [p.port for p in router_db.attached_ports]
-        else:
-            # When the existing deployment is migrated to OVN
-            # we may need to consider other port types - DVR_INTERFACE/HA_INTF.
-            #仅含路由器接口上的port
-            return [p.port for p in router_db.attached_ports
-                    if p.port_type in [n_const.DEVICE_OWNER_ROUTER_INTF,
-                                       n_const.DEVICE_OWNER_DVR_INTERFACE,
-                                       n_const.DEVICE_OWNER_ROUTER_HA_INTF]]
-
-    def _get_v4_network_of_all_router_ports(self, context, router_id,
-                                            ports=None):
-        #获取路由器接入到多少个network上
-        #这个函数有问题，当port上有多个ip地址时，实际上仅有一个生效
-        networks = []
-        ports = ports or self._get_router_ports(context, router_id)
-        for port in ports:
-            network = self._get_v4_network_for_router_port(context, port)
-            if network:
-                networks.append(network)
-
-        return networks
-
-    def get_external_router_and_gateway_ip(self, context, router):
-        #获取路由外部ip的第一个ip及其所属subnet的网关（限ipv4)
-        ext_gw_info = router.get(l3.EXTERNAL_GW_INFO, {})
-        ext_fixed_ips = ext_gw_info.get('external_fixed_ips', [])
-        for ext_fixed_ip in ext_fixed_ips:
-            subnet_id = ext_fixed_ip['subnet_id']
-            subnet = self._plugin.get_subnet(context.elevated(), subnet_id)
-            if subnet['ip_version'] == 4:
-                return ext_fixed_ip['ip_address'], subnet.get('gateway_ip')
-        return '', ''
-
-    def _get_router_ip(self, context, router):
-        #获取路由器外部ip(限一个）
-        router_ip, gateway_ip = self.get_external_router_and_gateway_ip(
-            context, router)
-        return router_ip
-
-    def _get_v4_network_for_router_port(self, context, port):
-        #获取路由器外部ip对应的网段（限一个）
-        cidr = None
-        for fixed_ip in port['fixed_ips']:
-            subnet_id = fixed_ip['subnet_id']
-            subnet = self._plugin.get_subnet(context, subnet_id)
-            if subnet['ip_version'] != 4:
-                continue
-            cidr = subnet['cidr']
-        return cidr
+    def create_router_precommit(self, resource, event, trigger, context,
+                                router, router_id, router_db):
+        db_rev.create_initial_revision(
+            router_id, ovn_const.TYPE_ROUTERS, context.session)
 
     def create_router(self, context, router):
         #创建路由器
         router = super(OVNL3RouterPlugin, self).create_router(context, router)
-        networks = self._get_v4_network_of_all_router_ports(
-            context, router['id'])
         try:
-            self._ovn_client.create_router(router, networks=networks)
+            self._ovn_client.create_router(router)
         except Exception:
             with excutils.save_and_reraise_exception():
                 # Delete the logical router
@@ -186,10 +146,8 @@ class OVNL3RouterPlugin(service_base.ServicePluginBase,
         original_router = self.get_router(context, id)
         result = super(OVNL3RouterPlugin, self).update_router(context, id,
                                                               router)
-        networks = self._get_v4_network_of_all_router_ports(context, id)
         try:
-            self._ovn_client.update_router(
-                result, original_router, router, networks)
+            self._ovn_client.update_router(result, original_router)
         except Exception:
             with excutils.save_and_reraise_exception():
                 LOG.exception('Unable to update lrouter for %s', id)
@@ -197,19 +155,6 @@ class OVNL3RouterPlugin(service_base.ServicePluginBase,
                 super(OVNL3RouterPlugin, self).update_router(context, id,
                                                              revert_router)
         return result
-
-    def _update_lrouter_routes(self, context, router_id, add, remove):
-        #添加删除静态路由
-        lrouter_name = utils.ovn_name(router_id)
-        with self._ovn.transaction(check_error=True) as txn:
-            for route in add:
-                txn.add(self._ovn.add_static_route(
-                    lrouter_name, ip_prefix=route['destination'],
-                    nexthop=route['nexthop']))
-            for route in remove:
-                txn.add(self._ovn.delete_static_route(
-                    lrouter_name, ip_prefix=route['destination'],
-                    nexthop=route['nexthop']))
 
     def delete_router(self, context, id):
         #路由器删除
@@ -234,7 +179,8 @@ class OVNL3RouterPlugin(service_base.ServicePluginBase,
                 len(port['fixed_ips']) > 1):
             # NOTE(lizk) It's adding a subnet onto an already existing router
             # interface port, try to update lrouter port 'networks' column.
-            self._ovn_client.update_router_port(router_id, port)
+            self._ovn_client.update_router_port(port,
+                                                bump_db_rev=False)
             multi_prefix = True
         else:
             self._ovn_client.create_router_port(router_id, port)
@@ -272,6 +218,7 @@ class OVNL3RouterPlugin(service_base.ServicePluginBase,
                               {'subnet': router_interface_info['subnet_id'],
                                'router': router_id})
 
+        db_rev.bump_revision(port, ovn_const.TYPE_ROUTER_PORTS)
         return router_interface_info
 
     def remove_router_interface(self, context, router_id, interface_info):
@@ -282,17 +229,22 @@ class OVNL3RouterPlugin(service_base.ServicePluginBase,
         router = self.get_router(context, router_id)
         port_id = router_interface_info['port_id']
         multi_prefix = False
+        port_removed = False
         try:
             port = self._plugin.get_port(context, port_id)
             # The router interface port still exists, call ovn to update it.
-            self._ovn_client.update_router_port(router_id, port)
+            self._ovn_client.update_router_port(port,
+                                                bump_db_rev=False)
             multi_prefix = True
         except n_exc.PortNotFound:
-            # The router interface port doesn't exist any more, call ovn to
-            # delete it.
-            self._ovn_client.delete_router_port(port_id, router_id)
+            # The router interface port doesn't exist any more,
+            # we will call ovn to delete it once we remove the snat
+            # rules in the router itself if we have to
+            port_removed = True
 
         if not router.get(l3.EXTERNAL_GW_INFO):
+            if port_removed:
+                self._ovn_client.delete_router_port(port_id, router_id)
             return router_interface_info
 
         #有external_gateway时需要移除nat
@@ -320,94 +272,54 @@ class OVNL3RouterPlugin(service_base.ServicePluginBase,
                     context, router_id, interface_info)
                 LOG.error('Error is deleting snat')
 
+        # NOTE(mangelajo): If the port doesn't exist anymore, we delete the
+        # router port as the last operation and update the revision database
+        # to ensure consistency
+        if port_removed:
+            self._ovn_client.delete_router_port(port_id, router_id)
+        else:
+            # otherwise, we just update the revision database
+            db_rev.bump_revision(port, ovn_const.TYPE_ROUTER_PORTS)
+
         return router_interface_info
+
+    def create_floatingip_precommit(self, resource, event, trigger, context,
+                                    floatingip, floatingip_id, floatingip_db):
+        db_rev.create_initial_revision(
+            floatingip_id, ovn_const.TYPE_FLOATINGIPS, context.session)
 
     def create_floatingip(self, context, floatingip,
                           initial_status=n_const.FLOATINGIP_STATUS_DOWN):
         #添加floatingip,需要增加一对一nat规则
         fip = super(OVNL3RouterPlugin, self).create_floatingip(
             context, floatingip, initial_status)
-        router_id = fip.get('router_id')
-        if router_id:
-            update_fip = {}
-            fip_db = self._get_floatingip(context, fip['id'])
-            update_fip['fip_port_id'] = fip_db['floating_port_id']#floating-ip对应的port-id
-            update_fip['fip_net_id'] = fip['floating_network_id']#属于那个network
-            update_fip['logical_ip'] = fip['fixed_ip_address']#私网ip
-            update_fip['external_ip'] = fip['floating_ip_address']#floating-ip
-            self._ovn_client.create_floatingip(update_fip, router_id)
-
-            # NOTE(lucasagomes): Revise the expected status
-            # of floating ips, setting it to ACTIVE here doesn't
-            # see consistent with other drivers (ODL here), see:
-            # https://bugs.launchpad.net/networking-ovn/+bug/1657693
-            self.update_floatingip_status(context, fip['id'],
-                                          n_const.FLOATINGIP_STATUS_ACTIVE)
+        self._ovn_client.create_floatingip(fip)
         return fip
 
     def delete_floatingip(self, context, id):
-        #floating-ip删除，需要移除dnat_and_snat规则
+        # TODO(lucasagomes): Passing ``original_fip`` object as a
+        # parameter to the OVNClient's delete_floatingip() method is done
+        # for backward-compatible reasons. Remove it in the Rocky release
+        # of OpenStack.
         original_fip = self.get_floatingip(context, id)
-        router_id = original_fip.get('router_id')
         super(OVNL3RouterPlugin, self).delete_floatingip(context, id)
-
-        if router_id and original_fip.get('fixed_ip_address'):
-            update_fip = {}
-            update_fip['logical_ip'] = original_fip['fixed_ip_address']
-            update_fip['external_ip'] = original_fip['floating_ip_address']
-            try:
-                self._ovn_client.delete_floatingip(update_fip, router_id)
-            except Exception:
-                with excutils.save_and_reraise_exception():
-                    LOG.error('Error in disassociating floatingip: %s', id)
+        self._ovn_client.delete_floatingip(id, fip_object=original_fip)
 
     def update_floatingip(self, context, id, floatingip):
-        #floating-ip更新，需要更新dnat_and_snat规则
-        fip_db = self._get_floatingip(context, id)
-        previous_fip = self._make_floatingip_dict(fip_db)
-        previous_port_id = previous_fip.get('port_id')
-
+        # TODO(lucasagomes): Passing ``original_fip`` object as a
+        # parameter to the OVNClient's update_floatingip() method is done
+        # for backward-compatible reasons. Remove it in the Rocky release
+        # of OpenStack.
+        original_fip = self.get_floatingip(context, id)
         fip = super(OVNL3RouterPlugin, self).update_floatingip(context, id,
                                                                floatingip)
-        new_port_id = fip.get('port_id')
-        fip_status = None
-        if previous_port_id and (
-            previous_port_id != new_port_id or (
-                previous_fip['fixed_ip_address'] != fip['fixed_ip_address'])):
-            # 1. Floating IP dissociated
-            # 2. Floating IP re-associated to a new port
-            # 3. Floating IP re-associated to a new fixed_ip (same port)
-            update_fip = {}
-            update_fip['logical_ip'] = previous_fip['fixed_ip_address']
-            update_fip['external_ip'] = fip['floating_ip_address']
-            try:
-                #先移除掉
-                self._ovn_client.update_floatingip(
-                    update_fip, previous_fip['router_id'], associate=False)
-                fip_status = n_const.FLOATINGIP_STATUS_DOWN
-            except Exception:
-                with excutils.save_and_reraise_exception():
-                    LOG.error('Unable to update floating ip in gateway router')
+        self._ovn_client.update_floatingip(fip, fip_object=original_fip)
+        return fip
 
-        if new_port_id:
-            update_fip = {}
-            update_fip['fip_port_id'] = fip_db['floating_port_id']
-            update_fip['fip_net_id'] = fip['floating_network_id']
-            update_fip['logical_ip'] = fip['fixed_ip_address']
-            update_fip['external_ip'] = fip['floating_ip_address']
-            try:
-                #重新绑定到另一个port上，关联创建规则
-                self._ovn_client.update_floatingip(
-                    update_fip, fip['router_id'], associate=True)
-                fip_status = n_const.FLOATINGIP_STATUS_ACTIVE
-            except Exception:
-                with excutils.save_and_reraise_exception():
-                    LOG.error('Unable to update floating ip in gateway router')
-
-        if fip_status:
-            #更新floatingip状态
-            self.update_floatingip_status(context, id, fip_status)
-
+    def update_floatingip_status(self, context, floatingip_id, status):
+        fip = super(OVNL3RouterPlugin, self).update_floatingip_status(
+            context, floatingip_id, status)
+        self._ovn_client.update_floatingip_status(fip)
         return fip
 
     def disassociate_floatingips(self, context, port_id, do_notify=True):
@@ -452,17 +364,25 @@ class OVNL3RouterPlugin(service_base.ServicePluginBase,
                 port['network_id'])
         return port_physnet_dict
 
+    def update_router_gateway_port_bindings(self, router, host):
+        context = n_context.get_admin_context()
+        filters = {'device_id': [router],
+                   'device_owner': [n_const.DEVICE_OWNER_ROUTER_GW]}
+        for port in self._plugin.get_ports(context, filters=filters):
+            self._plugin.update_port(
+                context, port['id'], {'port': {portbindings.HOST_ID: host}})
+
     def schedule_unhosted_gateways(self):
         port_physnet_dict = self._get_gateway_port_physnet_mapping()
         chassis_physnets = self._sb_ovn.get_chassis_and_physnets()
+        cms = self._sb_ovn.get_gateway_chassis_from_cms_options()
         unhosted_gateways = self._ovn.get_unhosted_gateways(
-            port_physnet_dict, chassis_physnets)
+            port_physnet_dict, chassis_physnets, cms)
         with self._ovn.transaction(check_error=True) as txn:
             for g_name in unhosted_gateways:
                 physnet = port_physnet_dict.get(g_name[len('lrp-'):])
-                candidates = [chassis
-                              for chassis, physnets in chassis_physnets.items()
-                              if physnet and physnet in physnets]
+                candidates = self._ovn_client.get_candidates_for_scheduling(
+                    physnet, cms=cms, chassis_physnets=chassis_physnets)
                 chassis = self.scheduler.select(
                     self._ovn, self._sb_ovn, g_name, candidates=candidates)
                 txn.add(self._ovn.update_lrouter_port(
@@ -493,5 +413,23 @@ class OVNL3RouterPlugin(service_base.ServicePluginBase,
                   ] if orig_gw_ip else []
         add = [{'destination': '0.0.0.0/0', 'nexthop': current_gw_ip}
                ] if current_gw_ip else []
-        for router_id in router_ids:
-            l3plugin._update_lrouter_routes(context, router_id, add, remove)
+        with l3plugin._ovn.transaction(check_error=True) as txn:
+            for router_id in router_ids:
+                l3plugin._ovn_client.update_router_routes(
+                    context, router_id, add, remove, txn=txn)
+
+    @staticmethod
+    @registry.receives(resources.PORT, [events.AFTER_UPDATE])
+    def _port_update(resource, event, trigger, **kwargs):
+        l3plugin = directory.get_plugin(plugin_constants.L3)
+        if not l3plugin:
+            return
+
+        current = kwargs['port']
+
+        if utils.is_lsp_router_port(current):
+            # We call the update_router port with if_exists, because neutron,
+            # internally creates the port, and then calls update, which will
+            # trigger this callback even before we had the chance to create
+            # the OVN NB DB side
+            l3plugin._ovn_client.update_router_port(current, if_exists=True)

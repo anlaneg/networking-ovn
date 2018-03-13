@@ -12,7 +12,11 @@ sed -i -e 's/<IP address of host running everything else>/'$OVN_CONTROLLER_IP'/g
 sudo umount /opt/stack/data/nova/instances
 
 # Get the IP address
-ipaddress=$(ip -4 addr show eth1 | grep -oP "(?<=inet ).*(?=/)")
+if ip a | grep enp0 ; then
+    ipaddress=$(ip -4 addr show enp0s8 | grep -oP "(?<=inet ).*(?=/)")
+else
+    ipaddress=$(ip -4 addr show eth1 | grep -oP "(?<=inet ).*(?=/)")
+fi
 
 # Fixup HOST_IP with the local IP address
 sed -i -e 's/<IP address of current host>/'$ipaddress'/g' devstack/local.conf
@@ -40,6 +44,8 @@ PHYSICAL_NETWORK=provider
 # as necessary for your environment.
 NETWORK_GATEWAY=172.16.1.1
 FIXED_RANGE=172.16.1.0/24
+
+ENABLE_CHASSIS_AS_GW=False
 DEVSTACKEOF
 
 # Add unique post-config for DevStack here using a separate 'cat' with

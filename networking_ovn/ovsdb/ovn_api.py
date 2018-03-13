@@ -20,43 +20,16 @@ import six
 class API(api.API):
 
     @abc.abstractmethod
-    def create_lswitch(self, name, may_exist=True, **columns):
-        """Create a command to add an OVN lswitch
-
-        :param name:         The id of the lswitch
-        :type name:          string
-        :param may_exist:    Do not fail if lswitch already exists
-        :type may_exist:     bool
-        :param columns:      Dictionary of lswitch columns
-                             Supported columns: external_ids
-        :type columns:       dictionary
-        :returns:            :class:`Command` with no result
-        """
-
-    @abc.abstractmethod
-    def set_lswitch_ext_id(self, name, ext_id, if_exists=True):
-        """Create a command to set OVN lswitch external id
+    def set_lswitch_ext_ids(self, name, ext_ids, if_exists=True):
+        """Create a command to set OVN lswitch external ids
 
         :param name:      The name of the lswitch
         :type name:       string
-        :param ext_id:    The external id to set for the lswitch
-        :type ext_id:     pair of <ext_id_key ,ext_id_value>
+        :param ext_ids    The external ids to set for the lswitch
+        :type ext_ids:    dictionary
         :param if_exists: Do not fail if lswitch does not exist
         :type if_exists:  bool
         :returns:        :class:`Command` with no result
-        """
-
-    @abc.abstractmethod
-    def delete_lswitch(self, name=None, ext_id=None, if_exists=True):
-        """Create a command to delete an OVN lswitch
-
-        :param name:      The name of the lswitch
-        :type name:       string
-        :param ext_id:    The external id of the lswitch
-        :type ext_id:     pair of <ext_id_key ,ext_id_value>
-        :param if_exists: Do not fail if the lswitch does not exist
-        :type if_exists:  bool
-        :returns:         :class:`Command` with no result
         """
 
     @abc.abstractmethod
@@ -148,7 +121,7 @@ class API(api.API):
         """
 
     @abc.abstractmethod
-    def add_lrouter_port(self, name, lrouter, if_exists=True,
+    def add_lrouter_port(self, name, lrouter, may_exist=True,
                          **columns):
         """Create a command to add an OVN lrouter port
 
@@ -158,8 +131,9 @@ class API(api.API):
         :type lrouter:       string
         :param lswitch:      The unique name of the lswitch
         :type lswitch:       string
-        :param if_exists:    Do not fail if lrouter port already exists
-        :type if_exists:     bool
+        :param may_exist:    If true, do not fail if lrouter port set
+                             already exists.
+        :type may_exist:     bool
         :param columns:      Dictionary of lrouter columns
                              Supported columns: external_ids, mac, network
         :type columns:       dictionary
@@ -251,6 +225,15 @@ class API(api.API):
         :type need_compare:           bool
         :is_add_acl:                  If updating is caused by adding acl
         :type is_add_acl:             bool
+        """
+
+    @abc.abstractmethod
+    def get_acl_by_id(self, acl_id):
+        """Get an ACL by its ID.
+
+        :param acl_id:                ID of the ACL to lookup
+        :type acl_id:                 string
+        :returns                      The ACL row or None:
         """
 
     @abc.abstractmethod
@@ -354,17 +337,20 @@ class API(api.API):
         """
 
     @abc.abstractmethod
-    def get_unhosted_gateways(self, port_physnet_dict, chassis_physnets):
+    def get_unhosted_gateways(self, port_physnet_dict, chassis_physnets,
+                              gw_chassis):
         """Return a list of gateways not hosted on chassis
 
         :param port_physnet_dict: Dictionary of gateway ports and their physnet
         :param chassis_physnets:  Dictionary of chassis and physnets
+        :param gw_chassis:        List of gateway chassis provided by admin
+                                  through ovn-cms-options
         :returns:                 List of gateways not hosted on a valid
                                   chassis
         """
 
     @abc.abstractmethod
-    def add_dhcp_options(self, subnet_id, port_id=None, may_exists=True,
+    def add_dhcp_options(self, subnet_id, port_id=None, may_exist=True,
                          **columns):
         """Adds the DHCP options specified in the @columns in DHCP_Options
 
@@ -378,11 +364,11 @@ class API(api.API):
         :param port_id:        The port id to which the DHCP options belong to
                                if specified
         :type port_id:         string
-        :param may_exists:     If true, checks if the DHCP options for
+        :param may_exist:      If true, checks if the DHCP options for
                                subnet_id exists or not. If it already exists,
                                it updates the row with the columns specified.
                                Else creates a new row.
-        :type may_exists:      bool
+        :type may_exist:       bool
         :type columns:         Dictionary of DHCP_Options columns
                                Supported columns: see DHCP_Options table in
                                OVN_Northbound
@@ -401,13 +387,15 @@ class API(api.API):
         """
 
     @abc.abstractmethod
-    def get_subnet_dhcp_options(self, subnet_id):
+    def get_subnet_dhcp_options(self, subnet_id, with_ports=False):
         """Returns the Subnet DHCP options as a dictionary
 
         :param subnet_id:      The subnet id whose DHCP options are returned
         :type subnet_id:       string
-        :returns:              Returns the columns of the DHCP_Options as a
-                               dictionary. None is returned if no DHCP options.
+        :param with_ports:     If True, also returns the ports DHCP options.
+        :type with_ports:      bool
+        :returns:              Returns a dictionary containing two keys:
+                               subnet and ports.
         """
 
     @abc.abstractmethod
@@ -419,21 +407,6 @@ class API(api.API):
         :returns:              Returns the columns of the DHCP_Options as list
                                of dictionary. Empty list is returned if no
                                DHCP_Options matched found.
-        """
-
-    @abc.abstractmethod
-    def compose_dhcp_options_commands(self, subnet_id, **columns):
-        """Returns a list of 'Command' objects to add the DHCP options in NB DB
-
-        Checks if there are DHCP_Options rows for the logical switch ports
-        belonging to the @subnet_id and if found adds into the `Command` list.
-
-        @param subnet_id:     The subnet id to which DHCP Options are to be
-                              added
-        @type subnet_id:      string
-        @type columns:        Dictionary of DHCP_Options columns
-        @returns:             List of 'Command' objects returned by
-                              'add_dhcp_options'
         """
 
     @abc.abstractmethod
@@ -529,6 +502,109 @@ class API(api.API):
         :returns:            :class:`Command` with no result
         """
 
+    @abc.abstractmethod
+    def get_lswitch(self, lswitch_name):
+        """Returns the logical switch
+
+        :param lswitch_name: The unique name of the logical switch
+        :type lswitch_name: string
+        :returns: Returns logical switch or None
+        """
+
+    @abc.abstractmethod
+    def get_ls_and_dns_record(self, lswitch_name):
+        """Returns the logical switch and 'dns' records
+
+        :param lswitch_name: The unique name of the logical switch
+        :type lswitch_name: string
+        :returns: Returns logical switch and dns records as a tuple
+        """
+
+    @abc.abstractmethod
+    def get_floatingip(self, fip_id):
+        """Get a Floating IP by its ID
+
+        :param fip_id: The floating IP id
+        :type fip_id: string
+        :returns: The NAT rule row or None
+        """
+
+    @abc.abstractmethod
+    def get_floatingip_by_ips(self, router_id, logical_ip, external_ip):
+        """Get a Floating IP based on it's logical and external IPs.
+
+        DEPRECATED. In the Rocky release of OpenStack this method can be
+        removed and get_floatingip() should be used instead. This method
+        is a backward compatibility layer for the Pike -> Queens release.
+
+        :param router_id: The ID of the router to which the FIP belongs to.
+        :type lrouter:  string
+        :param logical_ip: The FIP's logical IP address
+        :type logical_ip: string
+        :param external_ip: The FIP's external IP address
+        :type external_ip: string
+        :returns: The NAT rule row or None
+        """
+
+    def check_revision_number(self, name, resource, resource_type,
+                              if_exists=True):
+        """Compare the revision number from Neutron and OVN.
+
+        Check if the revision number in OVN is lower than the one from
+        the Neutron resource, otherwise raise RevisionConflict and abort
+        the transaction.
+
+        :param name:          The unique name of the resource
+        :type name:           string
+        :param resource:      The neutron resource object
+        :type resource:       dictionary
+        :param resource_type: The resource object type
+        :type resource_type:  dictionary
+        :param if_exists:     Do not fail if resource does not exist
+        :type if_exists:      bool
+        :returns:             :class:`Command` with no result
+        :raise:               RevisionConflict if the revision number in
+                              OVN is equal or higher than the neutron object
+        """
+
+    @abc.abstractmethod
+    def get_lswitch_port(self, lsp_name):
+        """Get a Logical Switch Port by its name.
+
+        :param lsp_name: The Logical Switch Port name
+        :type lsp_name: string
+        :returns: The Logical Switch Port row or None
+        """
+
+    @abc.abstractmethod
+    def get_lrouter(self, lrouter_name):
+        """Get a Logical Router by its name
+
+        :param lrouter_name: The name of the logical router
+        :type lrouter_name: string
+        :returns: The Logical_Router row or None
+        """
+
+    @abc.abstractmethod
+    def delete_lrouter_ext_gw(self, lrouter_name):
+        """Delete Logical Router external gateway.
+
+        :param lrouter_name: The name of the logical router
+        :type lrouter_name: string
+        :returns: :class:`Command` with no result
+        """
+
+    @abc.abstractmethod
+    def get_address_set(self, addrset_id, ip_version='ip4'):
+        """Get a Address Set by its ID.
+
+        :param addrset_id: The Address Set ID
+        :type addrset_id: string
+        :param ip_version: Either "ip4" or "ip6". Defaults to "ip4"
+        :type addr_name: string
+        :returns: The Address Set row or None
+        """
+
 
 @six.add_metaclass(abc.ABCMeta)
 class SbAPI(api.API):
@@ -548,6 +624,18 @@ class SbAPI(api.API):
 
         Hostname will be dict key, and a list of physnets will be dict
         value. And hostname and physnets are related to the same host.
+        """
+
+    def get_gateway_chassis_from_cms_options(self):
+        """Get chassis eligible for external connectivity from CMS options.
+
+        When admin wants to enable router gateway on few chassis,
+        he would set the external_ids as
+
+        ovs-vsctl set open .
+           external_ids:ovn-cms-options="enable-chassis-as-gw"
+        In this function, we parse ovn-cms-options and return these chassis
+        :returns:              List with chassis names.
         """
 
     @abc.abstractmethod

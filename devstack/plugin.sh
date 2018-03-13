@@ -16,13 +16,13 @@
 # networking-ovn actions for devstack plugin framework
 
 # Save trace setting
-XTRACE=$(set +o | grep xtrace)
+_XTRACE_OVN_PLUGIN=$(set +o | grep xtrace)
 set +o xtrace
 source $DEST/networking-ovn/devstack/lib/networking-ovn
 source $TOP_DIR/lib/neutron-legacy
 
 # main loop
-if is_service_enabled q-svc || is_ovn_service_enabled ovn-northd || is_ovn_service_enabled ovn-controller || is_ovn_service_enabled ovn-controller-vtep ; then
+if is_service_enabled q-svc || is_service_enabled ovn-northd || is_service_enabled ovn-controller || is_service_enabled ovn-controller-vtep ; then
     if [[ "$1" == "stack" && "$2" == "install" ]]; then
         install_ovn
         configure_ovn
@@ -63,7 +63,7 @@ if is_service_enabled q-svc || is_ovn_service_enabled ovn-northd || is_ovn_servi
 fi
 
 # Restore xtrace
-$XTRACE
+$_XTRACE_OVN_PLUGIN
 
 # Tell emacs to use shell-script-mode
 ## Local variables:

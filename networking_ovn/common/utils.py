@@ -13,6 +13,7 @@
 
 import os
 
+import netaddr
 from neutron_lib.api.definitions import extra_dhcp_opt as edo_ext
 from neutron_lib.api.definitions import l3
 from neutron_lib.api import validators
@@ -21,9 +22,12 @@ from neutron_lib import context as n_context
 from neutron_lib import exceptions as n_exc
 from neutron_lib.plugins import directory
 from neutron_lib.utils import net as n_utils
+from oslo_utils import netutils
+from oslo_utils import strutils
 
 from networking_ovn._i18n import _
 from networking_ovn.common import constants
+from networking_ovn.common import exceptions as ovn_exc
 
 
 def ovn_name(id):
@@ -76,13 +80,17 @@ def ovn_addrset_name(sg_id, ip_version):
     return ('as-%s-%s' % (ip_version, sg_id)).replace('-', '_')
 
 
+def is_network_device_port(port):
+    return port.get('device_owner', '').startswith(
+        const.DEVICE_OWNER_PREFIXES)
+
+
 def get_lsp_dhcp_opts(port, ip_version):
     # Get dhcp options from Neutron port, for setting DHCP_Options row
     # in OVN.
     lsp_dhcp_disabled = False
     lsp_dhcp_opts = {}
-    if port['device_owner'].startswith(const.DEVICE_OWNER_PREFIXES):
-        #neutron接口，禁止dhcp
+    if is_network_device_port(port):
         lsp_dhcp_disabled = True
     else:
         for edo in port.get(edo_ext.EXTRADHCPOPTS, []):
@@ -113,6 +121,13 @@ def get_lsp_dhcp_opts(port, ip_version):
 def is_lsp_trusted(port):
     #检查接口是否为可信接口
     return n_utils.is_port_trusted(port) if port.get('device_owner') else False
+
+
+def is_lsp_ignored(port):
+    # Since the floating IP port is not bound to any chassis, packets from vm
+    # destined to floating IP will be dropped. To overcome this, we do not
+    # create/update floating IP port in OVN.
+    return port.get('device_owner') in [const.DEVICE_OWNER_FLOATINGIP]
 
 
 def get_lsp_security_groups(port, skip_trusted_port=True):
@@ -195,3 +210,127 @@ def is_dhcp_options_ignored(subnet):
     # 'ipv6_address_mode', since DHCPv6 shouldn't work for this mode.
     return (subnet['ip_version'] == const.IP_VERSION_6 and
             subnet.get('ipv6_address_mode') == const.IPV6_SLAAC)
+
+
+def get_ovn_ipv6_address_mode(address_mode):
+    return constants.OVN_IPV6_ADDRESS_MODES[address_mode]
+
+
+def get_revision_number(resource, resource_type):
+    """Get the resource's revision number based on its type."""
+    if resource_type in (constants.TYPE_NETWORKS,
+                         constants.TYPE_PORTS,
+                         constants.TYPE_SECURITY_GROUP_RULES,
+                         constants.TYPE_ROUTERS,
+                         constants.TYPE_ROUTER_PORTS,
+                         constants.TYPE_SECURITY_GROUPS,
+                         constants.TYPE_FLOATINGIPS, constants.TYPE_SUBNETS):
+        return resource['revision_number']
+    else:
+        raise ovn_exc.UnknownResourceType(resource_type=resource_type)
+
+
+def remove_macs_from_lsp_addresses(addresses):
+    """Remove the mac addreses from the Logical_Switch_Port addresses column.
+
+    :param addresses: The list of addresses from the Logical_Switch_Port.
+        Example: ["80:fa:5b:06:72:b7 158.36.44.22",
+                  "ff:ff:ff:ff:ff:ff 10.0.0.2"]
+    :returns: A list of IP addesses (v4 and v6)
+    """
+    ip_list = []
+    for addr in addresses:
+        ip_list.extend([x for x in addr.split() if
+                       (netutils.is_valid_ipv4(x) or
+                        netutils.is_valid_ipv6(x))])
+    return ip_list
+
+
+def get_allowed_address_pairs_ip_addresses(port):
+    """Return a list of IP addresses from port's allowed_address_pairs.
+
+    :param port: A neutron port
+    :returns: A list of IP addesses (v4 and v6)
+    """
+    return [x['ip_address'] for x in port.get('allowed_address_pairs', [])
+            if 'ip_address' in x]
+
+
+def get_allowed_address_pairs_ip_addresses_from_ovn_port(ovn_port):
+    """Return a list of IP addresses from ovn port.
+
+    Return a list of IP addresses equivalent of Neutron's port
+    allowed_address_pairs column using the data in the OVN port.
+
+    :param ovn_port: A OVN port
+    :returns: A list of IP addesses (v4 and v6)
+    """
+    addresses = remove_macs_from_lsp_addresses(ovn_port.addresses)
+    port_security = remove_macs_from_lsp_addresses(ovn_port.port_security)
+    return [x for x in port_security if x not in addresses]
+
+
+def get_ovn_port_security_groups(ovn_port, skip_trusted_port=True):
+    info = {'security_groups': ovn_port.external_ids.get(
+            constants.OVN_SG_IDS_EXT_ID_KEY, '').split(),
+            'device_owner': ovn_port.external_ids.get(
+            constants.OVN_DEVICE_OWNER_EXT_ID_KEY, '')}
+    return get_lsp_security_groups(info, skip_trusted_port=skip_trusted_port)
+
+
+def get_ovn_port_addresses(ovn_port):
+    addresses = remove_macs_from_lsp_addresses(ovn_port.addresses)
+    port_security = remove_macs_from_lsp_addresses(ovn_port.port_security)
+    return list(set(addresses + port_security))
+
+
+def sort_ips_by_version(addresses):
+    ip_map = {'ip4': [], 'ip6': []}
+    for addr in addresses:
+        ip_version = netaddr.IPNetwork(addr).version
+        ip_map['ip%d' % ip_version].append(addr)
+    return ip_map
+
+
+def is_lsp_router_port(port):
+    return port.get('device_owner') in [const.DEVICE_OWNER_ROUTER_INTF,
+                                        const.DEVICE_OWNER_ROUTER_GW]
+
+
+def get_lrouter_ext_gw_static_route(ovn_router):
+    # TODO(lucasagomes): Remove the try...except block after OVS 2.8.2
+    # is tagged.
+    try:
+        for route in getattr(ovn_router, 'static_routes', []):
+            external_ids = getattr(route, 'external_ids', {})
+            if strutils.bool_from_string(
+                external_ids.get(constants.OVN_ROUTER_IS_EXT_GW, 'false')):
+                return route
+    except KeyError:
+        pass
+
+
+def get_lrouter_snats(ovn_router):
+    return [n for n in getattr(ovn_router, 'nat', []) if n.type == 'snat']
+
+
+def get_lrouter_non_gw_routes(ovn_router):
+    routes = []
+    # TODO(lucasagomes): Remove the try...except block after OVS 2.8.2
+    # is tagged.
+    try:
+        for route in getattr(ovn_router, 'static_routes', []):
+            external_ids = getattr(route, 'external_ids', {})
+            if strutils.bool_from_string(
+                external_ids.get(constants.OVN_ROUTER_IS_EXT_GW, 'false')):
+                continue
+
+            routes.append({'destination': route.ip_prefix,
+                           'nexthop': route.nexthop})
+    except KeyError:
+        pass
+    return routes
+
+
+def is_ovn_l3(l3_plugin):
+    return hasattr(l3_plugin, '_ovn_client_inst')

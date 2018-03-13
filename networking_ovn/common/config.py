@@ -10,12 +10,20 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 
+import sys
+
+from neutron_lib.api.definitions import portbindings
 from oslo_config import cfg
+from oslo_log import log as logging
 from ovsdbapp.backend.ovs_idl import vlog
 
 from networking_ovn._i18n import _
-from neutron_lib.api.definitions import portbindings
+from networking_ovn import version
 
+LOG = logging.getLogger(__name__)
+
+EXTRA_LOG_LEVEL_DEFAULTS = [
+]
 
 VLOG_LEVELS = {'CRITICAL': vlog.CRITICAL, 'ERROR': vlog.ERROR, 'WARNING':
                vlog.WARN, 'INFO': vlog.INFO, 'DEBUG': vlog.DEBUG}
@@ -105,6 +113,14 @@ ovn_opts = [
                       'leastloaded - chassis with fewest gateway ports '
                       'selected \n'
                       'chance - chassis randomly selected')),
+    cfg.BoolOpt('enable_distributed_floating_ip',
+                default=False,
+                help=_('Enable distributed floating IP support.\n'
+                       'If True, the NAT action for floating IPs will be done '
+                       'locally and not in the centralized gateway. This '
+                       'saves the path to the external network. This requires '
+                       'the user to configure the physical network map '
+                       '(i.e. ovn-bridge-mappings) on each compute node.')),
     cfg.StrOpt("vif_type",
                deprecated_for_removal=True,
                deprecated_reason="The port VIF type is now determined based "
@@ -195,6 +211,10 @@ def get_ovn_l3_scheduler():
     return cfg.CONF.ovn.ovn_l3_scheduler
 
 
+def is_ovn_distributed_floating_ip():
+    return cfg.CONF.ovn.enable_distributed_floating_ip
+
+
 def get_ovn_vhost_sock_dir():
     return cfg.CONF.ovn.vhost_sock_dir
 
@@ -210,3 +230,18 @@ def get_ovn_ovsdb_log_level():
 
 def is_ovn_metadata_enabled():
     return cfg.CONF.ovn.ovn_metadata_enabled
+
+
+def setup_logging():
+    """Sets up the logging options for a log with supplied name."""
+    product_name = "networking-ovn"
+    # We use the oslo.log default log levels and add only the extra levels
+    # that we need.
+    logging.set_defaults(default_log_levels=logging.get_default_log_levels() +
+                         EXTRA_LOG_LEVEL_DEFAULTS)
+    logging.setup(cfg.CONF, product_name)
+    LOG.info("Logging enabled!")
+    LOG.info("%(prog)s version %(version)s",
+             {'prog': sys.argv[0],
+              'version': version.version_info.release_string()})
+    LOG.debug("command line: %s", " ".join(sys.argv))

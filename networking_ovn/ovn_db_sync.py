@@ -66,17 +66,17 @@ class OvnDbSynchronizer(object):
 class OvnNbSynchronizer(OvnDbSynchronizer):
     """Synchronizer class for NB."""
 
-    def __init__(self, core_plugin, ovn_api, mode, ovn_driver):
+    def __init__(self, core_plugin, ovn_api, sb_ovn, mode, ovn_driver):
         super(OvnNbSynchronizer, self).__init__(
             core_plugin, ovn_api, ovn_driver)
         self.mode = mode
         self.l3_plugin = directory.get_plugin(plugin_constants.L3)
-        self._ovn_client = ovn_client.OVNClient(
-            ovn_api, self.l3_plugin._sb_ovn)
+        self._ovn_client = ovn_client.OVNClient(ovn_api, sb_ovn)
 
     def stop(self):
-        self.l3_plugin._ovn.ovsdb_connection.stop()
-        self.l3_plugin._sb_ovn.ovsdb_connection.stop()
+        if utils.is_ovn_l3(self.l3_plugin):
+            self.l3_plugin._ovn.ovsdb_connection.stop()
+            self.l3_plugin._sb_ovn.ovsdb_connection.stop()
         super(OvnNbSynchronizer, self).stop()
 
     def do_sync(self):
@@ -88,20 +88,9 @@ class OvnNbSynchronizer(OvnDbSynchronizer):
         ctx = context.get_admin_context()
         self.sync_address_sets(ctx)
         self.sync_networks_ports_and_dhcp_opts(ctx)
+        self.sync_port_dns_records(ctx)
         self.sync_acls(ctx)
         self.sync_routers_and_rports(ctx)
-
-    @staticmethod
-    def _get_attribute(obj, attribute):
-        res = obj.get(attribute)
-        if res is constants.ATTR_NOT_SPECIFIED:
-            res = None
-        return res
-
-    def _create_network_in_ovn(self, net):
-        physnet = self._get_attribute(net, pnet.PHYSICAL_NETWORK)
-        segid = self._get_attribute(net, pnet.SEGMENTATION_ID)
-        self._ovn_client.create_network(net, physnet, segid)
 
     def _create_port_in_ovn(self, ctx, port):
         # Remove any old ACLs for the port to avoid creating duplicate ACLs.
@@ -193,8 +182,7 @@ class OvnNbSynchronizer(OvnDbSynchronizer):
                 name = utils.ovn_addrset_name(sg['id'], ip_version)
                 neutron_sgs[name] = {
                     'name': name, 'addresses': [],
-                    'external_ids': {const.OVN_SG_NAME_EXT_ID_KEY:
-                                     sg['name']}}
+                    'external_ids': {const.OVN_SG_EXT_ID_KEY: sg['id']}}
 
         for port in db_ports:
             sg_ids = utils.get_lsp_security_groups(port)
@@ -260,7 +248,7 @@ class OvnNbSynchronizer(OvnDbSynchronizer):
                                               port,
                                               sg_cache,
                                               subnet_cache,
-                                              self.l3_plugin._ovn)
+                                              self.ovn_api)
                 if port_id in neutron_acls:
                     neutron_acls[port_id].extend(acl_list)
                 else:
@@ -305,6 +293,27 @@ class OvnNbSynchronizer(OvnDbSynchronizer):
         LOG.debug('ACL-SYNC: finished @ %s' %
                   str(datetime.now()))
 
+    def _calculate_fips_differences(self, ovn_fips, db_fips):
+        to_add = []
+        to_remove = []
+        for db_fip in db_fips:
+            for ovn_fip in ovn_fips:
+                if (ovn_fip['logical_ip'] == db_fip['fixed_ip_address'] and
+                   ovn_fip['external_ip'] == db_fip['floating_ip_address']):
+                    break
+            else:
+                to_add.append(db_fip)
+
+        for ovn_fip in ovn_fips:
+            for db_fip in db_fips:
+                if (ovn_fip['logical_ip'] == db_fip['fixed_ip_address'] and
+                   ovn_fip['external_ip'] == db_fip['floating_ip_address']):
+                    break
+            else:
+                to_remove.append(ovn_fip)
+
+        return to_add, to_remove
+
     def sync_routers_and_rports(self, ctx):
         """Sync Routers between neutron and NB.
 
@@ -321,7 +330,7 @@ class OvnNbSynchronizer(OvnDbSynchronizer):
                deleted from NB
         @return: Nothing
         """
-        if not config.is_ovn_l3():
+        if not utils.is_ovn_l3(self.l3_plugin):
             LOG.debug("OVN L3 mode is disabled, skipping "
                       "sync routers and router ports")
             return
@@ -340,38 +349,35 @@ class OvnNbSynchronizer(OvnDbSynchronizer):
             db_extends[router['id']]['fips'] = []
             if not router.get(l3.EXTERNAL_GW_INFO):
                 continue
-            r_ip, gw_ip = self.l3_plugin.get_external_router_and_gateway_ip(
-                ctx, router)
-            if gw_ip:
+            gw_info = self._ovn_client._get_gw_info(ctx, router)
+            if gw_info.gateway_ip:
                 db_extends[router['id']]['routes'].append(
-                    {'destination': '0.0.0.0/0', 'nexthop': gw_ip})
-            if r_ip and utils.is_snat_enabled(router):
-                networks = self.l3_plugin._get_v4_network_of_all_router_ports(
-                    ctx, router['id'])
+                    {'destination': '0.0.0.0/0',
+                     'nexthop': gw_info.gateway_ip})
+            if gw_info.router_ip and utils.is_snat_enabled(router):
+                networks = (
+                    self._ovn_client._get_v4_network_of_all_router_ports(
+                        ctx, router['id']))
                 for network in networks:
                     db_extends[router['id']]['snats'].append({
                         'logical_ip': network,
-                        'external_ip': r_ip,
+                        'external_ip': gw_info.router_ip,
                         'type': 'snat'})
 
         fips = self.l3_plugin.get_floatingips(
             ctx, {'router_id': list(db_routers.keys())})
         for fip in fips:
-            db_extends[fip['router_id']]['fips'].append(
-                {'external_ip': fip['floating_ip_address'],
-                 'logical_ip': fip['fixed_ip_address'],
-                 'type': 'dnat_and_snat'})
+            db_extends[fip['router_id']]['fips'].append(fip)
         interfaces = self.l3_plugin._get_sync_interfaces(
             ctx, list(db_routers.keys()),
             [constants.DEVICE_OWNER_ROUTER_INTF,
              constants.DEVICE_OWNER_ROUTER_GW,
              constants.DEVICE_OWNER_DVR_INTERFACE,
-             constants.DEVICE_OWNER_ROUTER_HA_INTF])
+             constants.DEVICE_OWNER_ROUTER_HA_INTF,
+             constants.DEVICE_OWNER_HA_REPLICATED_INT])
         for interface in interfaces:
             db_router_ports[interface['id']] = interface
-            db_router_ports[interface['id']]['networks'] = sorted(
-                self._ovn_client._get_networks_for_router_port(
-                    interface['fixed_ips']))
+
         lrouters = self.ovn_api.get_all_logical_routers_with_rports()
 
         del_lrouters_list = []
@@ -384,10 +390,11 @@ class OvnNbSynchronizer(OvnDbSynchronizer):
             if lrouter['name'] in db_routers:
                 for lrport, lrport_nets in lrouter['ports'].items():
                     if lrport in db_router_ports:
-                        db_lrport_nets = db_router_ports[lrport]['networks']
-                        if db_lrport_nets != sorted(lrport_nets):
-                            update_lrport_list.append((
-                                lrouter['name'], db_router_ports[lrport]))
+                        # We dont have to check for the networks and
+                        # ipv6_ra_configs values. Lets add it to the
+                        # update_lrport_list. If they are in sync, then
+                        # update_router_port will be a no-op.
+                        update_lrport_list.append(db_router_ports[lrport])
                         del db_router_ports[lrport]
                     else:
                         del_lrouter_ports_list.append(
@@ -407,7 +414,7 @@ class OvnNbSynchronizer(OvnDbSynchronizer):
                                             'del': del_routes})
                 ovn_fips = lrouter['dnat_and_snats']
                 db_fips = db_extends[lrouter['name']]['fips']
-                add_fips, del_fips = helpers.diff_list_of_dict(
+                add_fips, del_fips = self._calculate_fips_differences(
                     ovn_fips, db_fips)
                 update_fips_list.append({'id': lrouter['name'],
                                          'add': add_fips,
@@ -430,7 +437,8 @@ class OvnNbSynchronizer(OvnDbSynchronizer):
                 try:
                     LOG.warning("Creating the router %s in OVN NB DB",
                                 router['id'])
-                    self._ovn_client.create_router(router)
+                    self._ovn_client.create_router(
+                        router, add_external_gateway=False)
                     if 'routes' in router:
                         update_sroutes_list.append(
                             {'id': router['id'], 'add': router['routes'],
@@ -467,7 +475,7 @@ class OvnNbSynchronizer(OvnDbSynchronizer):
                     LOG.warning("Create router port in OVN "
                                 "NB failed for router port %s", rrport['id'])
 
-        for router_id, rport in update_lrport_list:
+        for rport in update_lrport_list:
             LOG.warning("Router Port port_id=%s needs to be updated "
                         "for networks changed",
                         rport['id'])
@@ -476,8 +484,7 @@ class OvnNbSynchronizer(OvnDbSynchronizer):
                     LOG.warning(
                         "Updating networks on router port %s in OVN NB DB",
                         rport['id'])
-                    self._ovn_client.update_router_port(
-                        router_id, rport, rport['networks'])
+                    self._ovn_client.update_router_port(rport)
                 except RuntimeError:
                     LOG.warning("Update router port networks in OVN "
                                 "NB failed for router port %s", rport['id'])
@@ -537,11 +544,8 @@ class OvnNbSynchronizer(OvnDbSynchronizer):
                             "Delete floating ips %s from OVN NB DB",
                             fip['del'])
                         for nat in fip['del']:
-                            txn.add(self.ovn_api.delete_nat_rule_in_lrouter(
-                                utils.ovn_name(fip['id']),
-                                logical_ip=nat['logical_ip'],
-                                external_ip=nat['external_ip'],
-                                type='dnat_and_snat'))
+                            self._ovn_client._delete_floatingip(
+                                nat, utils.ovn_name(fip['id']), txn=txn)
                 if fip['add']:
                     LOG.warning("Router %(id)s floating ips %(fip)s "
                                 "found in Neutron but not in OVN",
@@ -550,11 +554,8 @@ class OvnNbSynchronizer(OvnDbSynchronizer):
                         LOG.warning("Add floating ips %s to OVN NB DB",
                                     fip['add'])
                         for nat in fip['add']:
-                            txn.add(self.ovn_api.add_nat_rule_in_lrouter(
-                                utils.ovn_name(fip['id']),
-                                logical_ip=nat['logical_ip'],
-                                external_ip=nat['external_ip'],
-                                type='dnat_and_snat'))
+                            self._ovn_client._create_or_update_floatingip(
+                                nat, txn=txn)
             for snat in update_snats_list:
                 if snat['del']:
                     LOG.warning("Router %(id)s snat %(snat)s "
@@ -608,11 +609,8 @@ class OvnNbSynchronizer(OvnDbSynchronizer):
                     server_mac = ovn_dhcp_opts['options'].get('server_id')
                 else:
                     server_mac = ovn_dhcp_opts['options'].get('server_mac')
-                metadata_port_ip = self._ovn_client._find_metadata_port_ip(
-                    ctx, db_subnets[subnet_id])
                 dhcp_options = self._ovn_client._get_ovn_dhcp_options(
-                    db_subnets[subnet_id], network, server_mac=server_mac,
-                    metadata_port_ip=metadata_port_ip)
+                    db_subnets[subnet_id], network, server_mac=server_mac)
                 # Verify that the cidr and options are also in sync.
                 if dhcp_options['cidr'] == ovn_dhcp_opts['cidr'] and (
                         dhcp_options['options'] == ovn_dhcp_opts['options']):
@@ -633,14 +631,11 @@ class OvnNbSynchronizer(OvnDbSynchronizer):
                     LOG.debug('Adding/Updating DHCP options for subnet %s in '
                               ' OVN NB DB', subnet_id)
                     network = db_networks[utils.ovn_name(subnet['network_id'])]
-                    metadata_port_ip = self._ovn_client._find_metadata_port_ip(
-                        ctx, db_subnets[subnet_id])
                     # _ovn_client._add_subnet_dhcp_options doesn't create
                     # a new row in DHCP_Options if the row already exists.
                     # See commands.AddDHCPOptionsCommand.
                     self._ovn_client._add_subnet_dhcp_options(
-                        subnet, network, subnet.get('ovn_dhcp_options'),
-                        metadata_port_ip=metadata_port_ip)
+                        subnet, network, subnet.get('ovn_dhcp_options'))
                 except RuntimeError:
                     LOG.warning('Adding/Updating DHCP options for subnet '
                                 '%s failed in OVN NB DB', subnet_id)
@@ -727,12 +722,11 @@ class OvnNbSynchronizer(OvnDbSynchronizer):
         LOG.debug('OVN-NB Sync DHCP options for Neutron ports with extra '
                   'dhcp options assigned finished')
 
-    def _sync_metadata_ports(self, ctx):
+    def _sync_metadata_ports(self, ctx, db_ports):
         """Ensure metadata ports in all Neutron networks.
 
         This method will ensure that all networks have one and only one
-        metadata port in Neutron. Later on, when syncing Neutron and OVN ports,
-        the corresponding localport in OVN will be created for each of these.
+        metadata port.
         """
         if not config.is_ovn_metadata_enabled():
             return
@@ -746,11 +740,10 @@ class OvnNbSynchronizer(OvnDbSynchronizer):
                             'network %s', net['id'])
                 if self.mode == SYNC_MODE_REPAIR:
                     try:
-                        # Create the missing port in Neutron. Later it will be
-                        # created in OVN when sync_network_ports_and_dhcp_opts
-                        # is called.
+                        # Create the missing port in both Neutron and OVN.
                         LOG.warning('Creating missing metadadata port in '
-                                    'Neutron for network %s', net['id'])
+                                    'Neutron and OVN for network %s',
+                                    net['id'])
                         self._ovn_client.create_metadata_port(ctx, net)
                     except n_exc.IpAddressGenerationFailure:
                         LOG.error('Could not allocate IP addresses for '
@@ -766,6 +759,19 @@ class OvnNbSynchronizer(OvnDbSynchronizer):
                         LOG.warning('Deleting unnecessary DHCP port %s for '
                                     'network %s', port['id'], net['id'])
                         self.core_plugin.delete_port(ctx, port['id'])
+                    db_ports.pop(port['id'], None)
+                port = dhcp_ports[0]
+                if port['id'] in db_ports.keys():
+                    LOG.warning('Metadata port %s for network %s found in '
+                                'Neutron but not in OVN',
+                                port['id'], net['id'])
+                    if self.mode == SYNC_MODE_REPAIR:
+                        LOG.warning('Creating metadata port %s for network '
+                                    '%s in OVN',
+                                    port['id'], net['id'])
+                        self._create_port_in_ovn(ctx, port)
+                    db_ports.pop(port['id'])
+
             if self.mode == SYNC_MODE_REPAIR:
                 # Make sure that this port has an IP address in all the subnets
                 self._ovn_client.update_metadata_port(ctx, net['id'])
@@ -783,8 +789,7 @@ class OvnNbSynchronizer(OvnDbSynchronizer):
         # 取所有非floating-ip的port
         db_ports = {port['id']: port for port in
                     self.core_plugin.get_ports(ctx) if not
-                    port.get('device_owner', '').startswith(
-                    constants.DEVICE_OWNER_FLOATINGIP)}
+                    utils.is_lsp_ignored(port)}
 
         ovn_all_dhcp_options = self.ovn_api.get_all_dhcp_options()
         db_network_cache = dict(db_networks)
@@ -799,8 +804,10 @@ class OvnNbSynchronizer(OvnDbSynchronizer):
                 #确定port是否存在
                 for lport in lswitch['ports']:
                     if lport in db_ports:
-                        #记录此port需要检查dhcp_opts
-                        ports_need_sync_dhcp_opts.append(db_ports.pop(lport))
+                        port = db_ports.pop(lport)
+                        if not utils.is_network_device_port(port):
+                            #记录此port需要检查dhcp_opts
+                            ports_need_sync_dhcp_opts.append(port)
                     else:
                         #此port在lswitch上需要不存在的，移除
                         del_lports_list.append({'port': lport,
@@ -828,12 +835,12 @@ class OvnNbSynchronizer(OvnDbSynchronizer):
                 try:
                     LOG.debug('Creating the network %s in OVN NB DB',
                               network['id'])
-                    self._create_network_in_ovn(network)
+                    self._ovn_client.create_network(network)
                 except RuntimeError:
                     LOG.warning("Create network in OVN NB failed for "
                                 "network %s", network['id'])
 
-        self._sync_metadata_ports(ctx)
+        self._sync_metadata_ports(ctx, db_ports)
 
         #同步dhcp选项
         self._sync_subnet_dhcp_options(
@@ -870,8 +877,7 @@ class OvnNbSynchronizer(OvnDbSynchronizer):
                 if self.mode == SYNC_MODE_REPAIR:
                     LOG.debug('Deleting the network %s from OVN NB DB',
                               lswitch['name'])
-                    txn.add(self.ovn_api.delete_lswitch(
-                        lswitch_name=lswitch['name']))
+                    txn.add(self.ovn_api.ls_del(lswitch['name']))
 
             for provnet_port_info in add_provnet_ports_list:
                 network = provnet_port_info['network']
@@ -912,6 +918,40 @@ class OvnNbSynchronizer(OvnDbSynchronizer):
                                      ovn_all_dhcp_options['ports_v6'])
         LOG.debug('OVN-NB Sync networks, ports and DHCP options finished')
 
+    def sync_port_dns_records(self, ctx):
+        if self.mode != SYNC_MODE_REPAIR:
+            return
+        LOG.debug('OVN-NB Sync port dns records')
+        # Ignore the floating ip ports with device_owner set to
+        # constants.DEVICE_OWNER_FLOATINGIP
+        db_ports = [port for port in
+                    self.core_plugin.get_ports(ctx) if not
+                    port.get('device_owner', '').startswith(
+                        constants.DEVICE_OWNER_FLOATINGIP)]
+        dns_records = {}
+        for port in db_ports:
+            if self._ovn_client.is_dns_required_for_port(port):
+                port_dns_records = self._ovn_client.get_port_dns_records(port)
+                if port['network_id'] not in dns_records:
+                    dns_records[port['network_id']] = {}
+                dns_records[port['network_id']].update(port_dns_records)
+
+        for network_id, port_dns_records in dns_records.items():
+            self._set_dns_records(network_id, port_dns_records)
+
+    def _set_dns_records(self, network_id, dns_records):
+        lswitch_name = utils.ovn_name(network_id)
+        ls, ls_dns_record = self.ovn_api.get_ls_and_dns_record(lswitch_name)
+
+        with self.ovn_api.transaction(check_error=True) as txn:
+            if not ls_dns_record:
+                dns_add_txn = txn.add(self.ovn_api.dns_add(
+                    external_ids={'ls_name': ls.name}, records=dns_records))
+                txn.add(self.ovn_api.ls_set_dns_records(ls.uuid, dns_add_txn))
+            else:
+                txn.add(self.ovn_api.dns_set_records(ls_dns_record.uuid,
+                                                     **dns_records))
+
 
 class OvnSbSynchronizer(OvnDbSynchronizer):
     """Synchronizer class for SB."""
@@ -932,7 +972,7 @@ class OvnSbSynchronizer(OvnDbSynchronizer):
 
         ctx = context.get_admin_context()
         self.sync_hostname_and_physical_networks(ctx)
-        if config.is_ovn_l3():
+        if utils.is_ovn_l3(self.l3_plugin):
             self.l3_plugin.schedule_unhosted_gateways()
 
     def sync_hostname_and_physical_networks(self, ctx):
